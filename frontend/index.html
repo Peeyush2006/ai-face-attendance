@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IGNTU BCA Department - AI Attendance System</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Premium Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom Stylesheet -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-icon"><i class="fa-solid fa-graduation-cap"></i></div>
+                <div class="logo-text">
+                    <h2>IGNTU BCA</h2>
+                    <span>Attendance Portal</span>
+                </div>
+            </div>
+            
+            <nav class="nav-menu">
+                <button class="nav-item active" id="btn-dashboard" onclick="switchTab('dashboard')">
+                    <i class="fa-solid fa-chart-simple"></i>
+                    <span>Dashboard</span>
+                </button>
+                <button class="nav-item" id="btn-register" onclick="switchTab('register')">
+                    <i class="fa-solid fa-user-plus"></i>
+                    <span>Register</span>
+                </button>
+                <button class="nav-item" id="btn-camera" onclick="switchTab('camera')">
+                    <i class="fa-solid fa-camera"></i>
+                    <span>Take Attendance</span>
+                </button>
+                <button class="nav-item" id="btn-reports" onclick="switchTab('reports')">
+                    <i class="fa-solid fa-file-invoice"></i>
+                    <span>Reports</span>
+                </button>
+                <button class="nav-item" id="btn-settings" onclick="switchTab('settings')">
+                    <i class="fa-solid fa-gear"></i>
+                    <span>Settings</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="system-status">
+                    <div class="status-indicator online"></div>
+                    <span>AI Engine Active</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Toast Notification Container -->
+            <div id="toast-container" class="toast-container"></div>
+
+            <!-- Header -->
+            <header class="app-header">
+                <div class="header-title">
+                    <h1 id="page-title">Dashboard</h1>
+                    <p id="page-subtitle">IGNTU BCA Department Overview</p>
+                </div>
+                <div class="header-actions">
+                    <div class="date-badge">
+                        <i class="fa-regular fa-calendar-days"></i>
+                        <span id="current-date-badge">19 June 2026</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Screen 3: Admin Dashboard Tab -->
+            <section id="tab-dashboard" class="tab-pane active">
+                <!-- Stats Summary Row -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon purple"><i class="fa-solid fa-users"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Total Students</span>
+                            <h2 class="stat-value" id="stat-total-students">142</h2>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon green"><i class="fa-solid fa-user-check"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Present Today</span>
+                            <h2 class="stat-value text-green" id="stat-present-today">118</h2>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon red"><i class="fa-solid fa-user-xmark"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Absent</span>
+                            <h2 class="stat-value text-red" id="stat-absent-today">24</h2>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon gold"><i class="fa-solid fa-percent"></i></div>
+                        <div class="stat-info">
+                            <span class="stat-label">Avg Attendance</span>
+                            <h2 class="stat-value text-gold" id="stat-avg-attendance">83%</h2>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Alert Section -->
+                <div class="dashboard-body">
+                    <div class="card alert-card">
+                        <div class="card-header">
+                            <h3>Low Attendance Alerts (below 75%)</h3>
+                            <span class="badge badge-warning" id="alert-count">2 students</span>
+                        </div>
+                        <div class="alert-list" id="low-attendance-list">
+                            <!-- Pre-filled alerts from database -->
+                            <div class="alert-item">
+                                <div class="student-profile">
+                                    <div class="avatar">SK</div>
+                                    <div class="student-details">
+                                        <h4>Sheetal Kushwaha</h4>
+                                        <p>2401151017</p>
+                                    </div>
+                                </div>
+                                <div class="alert-progress-wrapper">
+                                    <div class="progress-info">
+                                        <span class="text-red">68%</span>
+                                    </div>
+                                    <div class="progress-bar-container">
+                                        <div class="progress-bar bg-red" style="width: 68%;"></div>
+                                    </div>
+                                </div>
+                                <button class="btn btn-secondary btn-sm" onclick="sendNotification('Sheetal Kushwaha', '68%')">Notify</button>
+                            </div>
+                            <div class="alert-item">
+                                <div class="student-profile">
+                                    <div class="avatar">MY</div>
+                                    <div class="student-details">
+                                        <h4>Muskan Yadav</h4>
+                                        <p>2401151025</p>
+                                    </div>
+                                </div>
+                                <div class="alert-progress-wrapper">
+                                    <div class="progress-info">
+                                        <span class="text-gold">72%</span>
+                                    </div>
+                                    <div class="progress-bar-container">
+                                        <div class="progress-bar bg-gold" style="width: 72%;"></div>
+                                    </div>
+                                </div>
+                                <button class="btn btn-secondary btn-sm" onclick="sendNotification('Muskan Yadav', '72%')">Notify</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Screen 1: Student Registration Tab -->
+            <section id="tab-register" class="tab-pane">
+                <div class="register-grid">
+                    <!-- Form card -->
+                    <div class="card register-form-card">
+                        <div class="card-header">
+                            <h3>Register New Student</h3>
+                        </div>
+                        <form id="student-registration-form" onsubmit="event.preventDefault();">
+                            <div class="form-group">
+                                <label for="reg-student-id">Student ID</label>
+                                <input type="text" id="reg-student-id" placeholder="e.g. BCA/2024/042" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="reg-full-name">Full Name</label>
+                                <input type="text" id="reg-full-name" placeholder="e.g. Peeyush Tiwari" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="reg-course-section">Course & Section (Optional)</label>
+                                <input type="text" id="reg-course-section" placeholder="e.g. BCA — Section A">
+                            </div>
+                            <div class="form-actions">
+                                <button type="button" class="btn btn-primary" id="btn-save-encode" onclick="saveAndEncodeStudent()" disabled>
+                                    <i class="fa-solid fa-circle-check"></i> Save & Encode
+                                </button>
+                                <button type="button" class="btn btn-secondary" onclick="clearRegistrationForm()">
+                                    Clear
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <!-- Camera and Photo capture card -->
+                    <div class="card register-camera-card">
+                        <div class="camera-widget">
+                            <div class="video-container">
+                                <video id="registration-video" autoplay playsinline muted></video>
+                                <canvas id="registration-canvas" style="display: none;"></canvas>
+                                <div class="camera-placeholder" id="reg-camera-placeholder">
+                                    <i class="fa-solid fa-camera"></i>
+                                    <p>Start webcam to capture photos</p>
+                                    <button class="btn btn-primary btn-sm" onclick="startRegistrationCamera()">
+                                        Start Camera
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="capture-controls">
+                                <div class="capture-text">
+                                    <i class="fa-solid fa-camera-rotate"></i>
+                                    <span>Capture 5 photos for robust encoding</span>
+                                </div>
+                                <div class="capture-progress">
+                                    <div class="progress-squares" id="progress-squares">
+                                        <div class="square"></div>
+                                        <div class="square"></div>
+                                        <div class="square"></div>
+                                        <div class="square"></div>
+                                        <div class="square"></div>
+                                    </div>
+                                    <span class="progress-text" id="capture-status">0/5 captured</span>
+                                </div>
+                                <button class="btn btn-primary" id="btn-capture" onclick="capturePhoto()" disabled>
+                                    Capture Photo
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Screen 2: Live Attendance Camera Tab -->
+            <section id="tab-camera" class="tab-pane">
+                <div class="live-attendance-grid">
+                    <!-- Live feed card -->
+                    <div class="live-feed-column">
+                        <div class="card live-camera-card">
+                            <div class="card-header border-none">
+                                <div class="live-title">
+                                    <span class="traffic-dot red"></span>
+                                    <span class="traffic-dot yellow"></span>
+                                    <span class="traffic-dot green"></span>
+                                    <span class="title-text">Take Attendance — <span id="camera-section-name">CSE Section A</span></span>
+                                </div>
+                                <div class="live-indicator-badge">
+                                    <span class="pulse-dot"></span> LIVE
+                                </div>
+                            </div>
+                            
+                            <div class="camera-viewport">
+                                <video id="attendance-video" autoplay playsinline muted style="display: none;"></video>
+                                <canvas id="attendance-canvas"></canvas>
+                                <div class="camera-placeholder" id="attendance-camera-placeholder">
+                                    <i class="fa-solid fa-circle-play"></i>
+                                    <p>Camera source is offline</p>
+                                    <button class="btn btn-primary" onclick="startAttendanceCamera()">
+                                        Activate Live Camera
+                                    </button>
+                                </div>
+                                <!-- Laser scanning effect overlay -->
+                                <div class="scan-overlay" id="scan-overlay" style="display: none;">
+                                    <div class="scan-frame"></div>
+                                    <div class="scan-line"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Scan success notification strip -->
+                        <div class="scan-success-alert" id="scan-success-alert" style="display: none;">
+                            <div class="alert-check"><i class="fa-solid fa-circle-check"></i></div>
+                            <div class="alert-details">
+                                <h4 id="success-student-info">Peeyush Kumar Tiwari — 2401151028</h4>
+                                <p>Marked present at <span id="success-time">09:14 AM</span> · Confidence <span id="success-conf">98.2%</span></p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right log column -->
+                    <div class="live-log-column">
+                        <div class="card today-log-card">
+                            <div class="card-header">
+                                <h3>Today's log</h3>
+                            </div>
+                            <div class="log-list" id="today-log-list">
+                                <!-- Populated dynamically by database records -->
+                            </div>
+                            <div class="card-footer" id="log-summary-text">
+                                Recognizing 1 face · 3/30 marked
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Screen 4: Reports & Export Tab -->
+            <section id="tab-reports" class="tab-pane">
+                <div class="card reports-card">
+                    <!-- Report Tabs -->
+                    <div class="reports-header-tabs">
+                        <button class="report-tab active" onclick="switchReportTab('daily')">Daily</button>
+                        <button class="report-tab" onclick="switchReportTab('monthly')">Monthly</button>
+                        <button class="report-tab" onclick="switchReportTab('student-wise')">Student-wise</button>
+                        <button class="report-tab" onclick="switchReportTab('subject-wise')">Subject-wise</button>
+                    </div>
+
+                    <!-- Report Filters Row -->
+                    <div class="reports-filters-bar">
+                        <div class="filter-controls">
+                            <div class="input-with-icon">
+                                <i class="fa-regular fa-calendar-days"></i>
+                                <input type="date" id="report-date-filter" onchange="loadReports()">
+                            </div>
+                            <div class="select-wrapper">
+                                <i class="fa-solid fa-filter"></i>
+                                <select id="report-course-filter" onchange="loadReports()">
+                                    <option value="All">BCA — All Sections</option>
+                                    <option value="Section A">BCA — Section A</option>
+                                    <option value="Section B">BCA — Section B</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="filter-actions">
+                            <button class="btn btn-secondary" onclick="exportExcel()">
+                                <i class="fa-solid fa-file-excel"></i> Export Excel
+                            </button>
+                            <button class="btn btn-secondary" onclick="exportPDF()">
+                                <i class="fa-solid fa-file-pdf"></i> Export PDF
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Report Table Container -->
+                    <div class="table-container">
+                        <table class="report-table">
+                            <thead>
+                                <tr>
+                                    <th>Roll</th>
+                                    <th>Name</th>
+                                    <th>Time</th>
+                                    <th>Conf.</th>
+                                    <th>Total %</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="report-table-body">
+                                <!-- Populated dynamically by database records -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Screen 5: Settings & Configuration Tab -->
+            <section id="tab-settings" class="tab-pane">
+                <div class="card settings-card">
+                    <div class="card-header">
+                        <h3>Settings & Configuration</h3>
+                    </div>
+                    <form id="settings-form" onsubmit="event.preventDefault(); saveSettings();">
+                        <!-- Confidence slider -->
+                        <div class="setting-item">
+                            <div class="setting-info">
+                                <label for="setting-threshold">Recognition confidence threshold</label>
+                                <span class="setting-desc">Min match score (0.0 = strict, 1.0 = loose)</span>
+                            </div>
+                            <div class="setting-control-slider">
+                                <input type="range" id="setting-threshold" min="0.10" max="0.90" step="0.05" value="0.50" oninput="document.getElementById('threshold-display').innerText = parseFloat(this.value).toFixed(2)">
+                                <span class="slider-display" id="threshold-display">0.50</span>
+                            </div>
+                        </div>
+
+                        <!-- Late threshold -->
+                        <div class="setting-item">
+                            <div class="setting-info">
+                                <label for="setting-late">Late threshold</label>
+                                <span class="setting-desc">Minutes after class start</span>
+                            </div>
+                            <div class="setting-control">
+                                <select id="setting-late">
+                                    <option value="5">5 mins</option>
+                                    <option value="10">10 mins</option>
+                                    <option value="15" selected>15 mins</option>
+                                    <option value="20">20 mins</option>
+                                    <option value="30">30 mins</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Camera source -->
+                        <div class="setting-item">
+                            <div class="setting-info">
+                                <label for="setting-camera">Camera source</label>
+                                <span class="setting-desc">Device index or RTSP URL</span>
+                            </div>
+                            <div class="setting-control">
+                                <select id="setting-camera">
+                                    <option value="0">Camera 0 (default)</option>
+                                    <option value="1">Camera 1</option>
+                                    <option value="2">Virtual Camera</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Email alerts toggle -->
+                        <div class="setting-item">
+                            <div class="setting-info">
+                                <label for="setting-email">Auto email alerts</label>
+                                <span class="setting-desc">Notify below 75% attendance</span>
+                            </div>
+                            <div class="setting-control">
+                                <label class="switch">
+                                    <input type="checkbox" id="setting-email" checked>
+                                    <span class="slider-toggle"></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Database path -->
+                        <div class="setting-item">
+                            <div class="setting-info">
+                                <label for="setting-db">Database path</label>
+                                <span class="setting-desc">SQLite file location</span>
+                            </div>
+                            <div class="setting-control">
+                                <input type="text" id="setting-db" value="./attendance.db" readonly class="input-readonly">
+                            </div>
+                        </div>
+
+                        <!-- Submit button -->
+                        <div class="settings-actions">
+                            <button type="submit" class="btn btn-primary">Save Settings</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Frontend Script -->
+    <script src="app.js"></script>
+</body>
+</html>
