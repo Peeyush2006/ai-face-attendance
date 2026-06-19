@@ -8,16 +8,10 @@ ENV PYTHONUNBUFFERED=1
 # Set the working directory inside the container
 WORKDIR /app
 
-# Install system dependencies required by OpenCV (libGL and glib)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy the dependency list
 COPY requirements.txt .
 
-# Install Python packages
+# Install Python packages (uses headless OpenCV to avoid building native X11/libGL dependencies)
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the backend and frontend folders into the container
@@ -27,5 +21,5 @@ COPY frontend/ ./frontend/
 # Expose the application port
 EXPOSE 8000
 
-# Start the FastAPI server, dynamically binding to the port provided by the hosting environment
-CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Start the FastAPI server using shell format to resolve Railway/Render's dynamic port variable
+CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
