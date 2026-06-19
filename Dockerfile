@@ -27,5 +27,5 @@ COPY frontend/ ./frontend/
 # Expose the application port
 EXPOSE 8000
 
-# Start the FastAPI server using uvicorn
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start the FastAPI server, dynamically binding to the port provided by the hosting environment
+CMD uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}
