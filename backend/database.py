@@ -3,8 +3,17 @@ import os
 import datetime
 import random
 import numpy as np
+from zoneinfo import ZoneInfo
 
-DB_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'attendance.db')
+IST = ZoneInfo("Asia/Kolkata")
+
+def get_ist_now():
+    return datetime.datetime.now(IST)
+
+def get_ist_today():
+    return datetime.datetime.now(IST).date()
+
+DB_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'attendance.db')
 
 def get_db_connection():
     conn = sqlite3.connect(DB_FILE)
@@ -123,7 +132,7 @@ def seed_mock_data(conn):
     all_students = cursor.fetchall()
     
     # We want today's date
-    today_str = datetime.date.today().isoformat()
+    today_str = get_ist_today().isoformat()
     
     # 2. Seed past 30 days of attendance logs
     # Overall target average is 83%. We can set specific attendance probabilities:
@@ -134,7 +143,7 @@ def seed_mock_data(conn):
     past_days = 30
     dates = []
     # Generate list of past 30 weekdays (excluding weekends)
-    curr = datetime.date.today() - datetime.timedelta(days=past_days)
+    curr = get_ist_today() - datetime.timedelta(days=past_days)
     while len(dates) < past_days:
         if curr.weekday() < 5:  # Monday to Friday
             dates.append(curr.isoformat())
@@ -309,9 +318,9 @@ def get_all_student_photos():
 def mark_attendance(student_id, status, time_str=None, confidence=None):
     conn = get_db_connection()
     cursor = conn.cursor()
-    today_str = datetime.date.today().isoformat()
+    today_str = get_ist_today().isoformat()
     if status in ['Present', 'Late'] and time_str is None:
-        time_str = datetime.datetime.now().strftime('%H:%M')
+        time_str = get_ist_now().strftime('%H:%M')
         
     try:
         cursor.execute('''
@@ -328,7 +337,7 @@ def mark_attendance(student_id, status, time_str=None, confidence=None):
 def get_today_attendance():
     conn = get_db_connection()
     cursor = conn.cursor()
-    today_str = datetime.date.today().isoformat()
+    today_str = get_ist_today().isoformat()
     
     # Join with students to get names and metadata
     cursor.execute('''
@@ -367,7 +376,7 @@ def get_dashboard_stats():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    today_str = datetime.date.today().isoformat()
+    today_str = get_ist_today().isoformat()
     
     # 1. Total Students
     cursor.execute('SELECT COUNT(*) FROM students')

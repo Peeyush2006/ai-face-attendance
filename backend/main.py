@@ -1,6 +1,7 @@
 import os
 import datetime
 import uvicorn
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -208,7 +209,8 @@ def process_frame(payload: dict = Body(...)):
                 
                 # Check late status
                 # Standard class start at 10:15 AM
-                now = datetime.datetime.now()
+                tz = ZoneInfo("Asia/Kolkata")
+                now = datetime.datetime.now(tz)
                 class_start = now.replace(hour=10, minute=15, second=0, microsecond=0)
                 late_cutoff = class_start + datetime.timedelta(minutes=late_threshold_mins)
                 
@@ -299,4 +301,4 @@ else:
     print(f"WARNING: Frontend path {frontend_path} not found. Static files won't be served.")
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

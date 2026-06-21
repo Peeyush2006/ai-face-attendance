@@ -121,7 +121,7 @@ def detect_faces(gray_img):
     """
     if face_cascade.empty():
         return []
-    faces = face_cascade.detectMultiScale(gray_img, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+    faces = face_cascade.detectMultiScale(gray_img, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
     return faces
 
 def preprocess_face(gray_img, bbox, size=(128, 128)):
