@@ -1,5 +1,5 @@
 # AI Face Recognition Attendance System
-#### Video Demo: [Add your YouTube URL here]
+#### Video Demo: [https://youtu.be/G3cJmIWHx50?si=RwHiRqq1lv_ybXpH]
 #### Description:
 
 ## What is this project?
