@@ -111,18 +111,38 @@ class EigenfaceRecognizer:
         except Exception:
             return False
 
-# Initialize Haar Cascade face detector
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+# Initialize Haar Cascade face detector with dynamic fallbacks
+face_cascade = None
+try:
+    if hasattr(cv2, 'CascadeClassifier'):
+        # Try standard OpenCV package data
+        if hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
+            xml_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
+            if os.path.exists(xml_path):
+                face_cascade = cv2.CascadeClassifier(xml_path)
+        
+        # Fallback to local file check or manual cascade initialization if not already loaded
+        if face_cascade is None or face_cascade.empty():
+            face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+    else:
+        print("WARNING: cv2 has no attribute 'CascadeClassifier'. Running in no-opencv fallback mode.")
+except Exception as e:
+    print("WARNING: Failed to load Haar Cascade face detector:", e)
+    face_cascade = None
 
 def detect_faces(gray_img):
     """
     Detects faces in a grayscale image.
     returns: list of bounding boxes (x, y, w, h)
     """
-    if face_cascade.empty():
+    if face_cascade is None or face_cascade.empty():
         return []
-    faces = face_cascade.detectMultiScale(gray_img, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    return faces
+    try:
+        faces = face_cascade.detectMultiScale(gray_img, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        return faces
+    except Exception as e:
+        print("ERROR running detectMultiScale:", e)
+        return []
 
 def preprocess_face(gray_img, bbox, size=(128, 128)):
     """

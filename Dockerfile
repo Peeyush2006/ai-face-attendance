@@ -1,5 +1,5 @@
-# Use an official lightweight Python image
-FROM python:3.11-slim
+# Use the official full Python image (contains all necessary system libraries for OpenCV out of the box)
+FROM python:3.11
 
 # Set environment variables to optimize Python execution and set timezone
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -9,17 +9,12 @@ ENV TZ=Asia/Kolkata
 # Set the working directory inside the container
 WORKDIR /app
 
-# Install glib system library (required by OpenCV) and tzdata (for timezone mapping)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libglib2.0-0 \
-    tzdata \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy the dependency list
 COPY requirements.txt .
 
-# Install Python packages
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python packages (force uninstalling any potential conflicts first)
+RUN pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless opencv-contrib-python-headless \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Copy the backend and frontend folders into the container
 COPY backend/ ./backend/
