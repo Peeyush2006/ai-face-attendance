@@ -37,41 +37,64 @@ app.add_middleware(
 # Global recognizer instance
 recognizer = face_rec.EigenfaceRecognizer(num_components=50, img_size=(128, 128))
 
-def load_and_train_recognizer():
+def load_and_train_recognizer(force: bool = False):
     global recognizer
-    # Try loading pre-trained model first
-    if os.path.exists(MODEL_PATH):
+    # Try loading pre-trained model first if not forced
+    if not force and os.path.exists(MODEL_PATH):
         if recognizer.load(MODEL_PATH):
             print("Loaded pre-trained PCA model successfully.")
             return True
             
-    # If not found or failed, train a new model from photos database
-    print("Training PCA model from database photos...")
-    photos = database.get_all_student_photos()
-    if not photos:
-        print("No student photos found in database. PCA training skipped.")
-        return False
-        
+    # Train a new model from photos database & data/faces directory
+    print("Training PCA model from database photos and faces directory...")
     faces_list = []
     labels_list = []
+    seen_paths = set()
+    import cv2
     
+    # 1. Check database records
+    photos = database.get_all_student_photos()
     for p in photos:
         path = p['photo_path']
         sid = p['student_id']
-        if os.path.exists(path):
-            # Load grayscale image
-            import cv2
+        
+        # Resolve path if absolute path moved
+        if not os.path.exists(path):
+            fname = os.path.basename(path)
+            candidate = os.path.join(FACES_DIR, sid.replace('/', '_'), fname)
+            if os.path.exists(candidate):
+                path = candidate
+                
+        real_path = os.path.normpath(os.path.abspath(path))
+        if os.path.exists(path) and real_path not in seen_paths:
+            seen_paths.add(real_path)
             img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if img is not None:
-                # Just in case, equalize hist
                 img_eq = cv2.equalizeHist(img)
                 faces_list.append(img_eq)
                 labels_list.append(sid)
                 
+    # 2. Also scan data/faces directory for any student face sets
+    if os.path.exists(FACES_DIR):
+        for sid_folder in os.listdir(FACES_DIR):
+            folder_path = os.path.join(FACES_DIR, sid_folder)
+            if os.path.isdir(folder_path):
+                for fname in os.listdir(folder_path):
+                    if fname.endswith(('.png', '.jpg', '.jpeg')):
+                        img_path = os.path.join(folder_path, fname)
+                        real_path = os.path.normpath(os.path.abspath(img_path))
+                        if real_path not in seen_paths:
+                            seen_paths.add(real_path)
+                            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+                            if img is not None:
+                                img_eq = cv2.equalizeHist(img)
+                                faces_list.append(img_eq)
+                                labels_list.append(sid_folder)
+                            
     if len(faces_list) > 0:
         if recognizer.train(faces_list, labels_list):
             recognizer.save(MODEL_PATH)
-            print(f"PCA Model trained successfully on {len(faces_list)} images and saved.")
+            print(f"PCA Model trained successfully on {len(faces_list)} images for {len(set(labels_list))} students and saved.")
             return True
     print("PCA Model training failed (insufficient images).")
     return False
@@ -156,8 +179,8 @@ def register_student(req: RegisterRequest):
         # Rollback or warning, but let's require at least 3 successful face encodings
         raise HTTPException(status_code=400, detail=f"Could only detect faces in {saved_photos_count}/5 photos. Please capture again in better lighting.")
         
-    # Retrain model with new student
-    load_and_train_recognizer()
+    # Force clean retrain of model with the new student's photos
+    load_and_train_recognizer(force=True)
     
     return {"message": f"Student registered successfully. {saved_photos_count} face encodings saved."}
 
@@ -171,7 +194,7 @@ def process_frame(payload: dict = Body(...)):
     try:
         img = face_rec.base64_to_cv2(frame_b64)
         if img is None:
-            return {"face_detected": False, "annotated_frame": frame_b64}
+            return {"face_detected": False, "recognitions": [], "recognition": None, "annotated_frame": frame_b64}
             
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         faces = face_rec.detect_faces(gray)
@@ -182,79 +205,164 @@ def process_frame(payload: dict = Body(...)):
         late_threshold_mins = int(settings.get('late_threshold', 15))
         
         face_detected = len(faces) > 0
-        recognition_result = None
+        recognitions = []
         
+        # Determine current time & late status
+        tz = ZoneInfo("Asia/Kolkata")
+        now = datetime.datetime.now(tz)
+        class_start = now.replace(hour=10, minute=15, second=0, microsecond=0)
+        late_cutoff = class_start + datetime.timedelta(minutes=late_threshold_mins)
+        status = 'Late' if now > late_cutoff else 'Present'
+        time_str = now.strftime('%H:%M')
+        
+        conn = database.get_db_connection()
+        
+        # 1. First pass: predict each face candidate
+        predictions = []
         for bbox in faces:
             x, y, w, h = bbox
             face_img = face_rec.preprocess_face(gray, bbox)
+            student_id, distance, confidence = recognizer.predict(face_img, threshold=threshold_setting)
+            predictions.append({
+                "bbox": (int(x), int(y), int(w), int(h)),
+                "student_id": student_id,
+                "distance": distance,
+                "confidence": confidence
+            })
             
-            # Predict face
-            student_id, distance = recognizer.predict(face_img)
+        # 2. Enforce 1-to-1 matching:
+        # A student cannot appear as two distinct physical faces in the same camera frame.
+        # Prioritize assigning the student ID to the face with the highest confidence.
+        assigned_students = set()
+        sorted_indices = sorted(range(len(predictions)), key=lambda i: predictions[i]["confidence"], reverse=True)
+        final_assignments = {}
+        
+        for idx in sorted_indices:
+            pred = predictions[idx]
+            sid = pred["student_id"]
+            conf = pred["confidence"]
             
-            # Distance mapping to confidence score:
-            # 0 distance -> 1.0 (100% confidence)
-            # 5000 distance -> 0.0 (0% confidence)
-            confidence = max(0.0, 1.0 - distance / 5000.0)
-            
-            # Draw overlay on BGR image
-            # Green for recognized, red for unknown
-            if student_id and confidence >= threshold_setting:
-                # Retrieve student name
-                conn = database.get_db_connection()
-                row = conn.execute('SELECT name, course_section FROM students WHERE student_id = ?', (student_id,)).fetchone()
-                conn.close()
+            if sid and conf >= threshold_setting and sid not in assigned_students:
+                assigned_students.add(sid)
+                final_assignments[idx] = (sid, conf)
+            else:
+                final_assignments[idx] = (None, conf)
                 
-                name = row['name'] if row else "Student"
+        # 3. Draw annotations and record attendance for uniquely matched faces
+        for idx, pred in enumerate(predictions):
+            x, y, w, h = pred["bbox"]
+            matched_sid, conf = final_assignments[idx]
+            
+            if matched_sid:
+                row = conn.execute('SELECT name, course_section FROM students WHERE student_id = ?', (matched_sid,)).fetchone()
+                name = row['name'] if row else matched_sid
                 course_section = row['course_section'] if row else ""
                 
-                # Check late status
-                # Standard class start at 10:15 AM
-                tz = ZoneInfo("Asia/Kolkata")
-                now = datetime.datetime.now(tz)
-                class_start = now.replace(hour=10, minute=15, second=0, microsecond=0)
-                late_cutoff = class_start + datetime.timedelta(minutes=late_threshold_mins)
+                # Mark attendance once per recognized student
+                database.mark_attendance(matched_sid, status, time_str, conf * 100)
                 
-                if now > late_cutoff:
-                    status = 'Late'
-                else:
-                    status = 'Present'
-                    
-                time_str = now.strftime('%H:%M')
-                
-                # Mark attendance
-                database.mark_attendance(student_id, status, time_str, confidence * 100)
-                
-                recognition_result = {
-                    "student_id": student_id,
+                rec_info = {
+                    "student_id": matched_sid,
                     "name": name,
                     "course_section": course_section,
                     "time": time_str,
-                    "confidence": f"{round(confidence * 100, 1)}%",
-                    "status": status
+                    "confidence": f"{round(conf * 100, 1)}%",
+                    "status": status,
+                    "bbox": [x, y, w, h]
                 }
+                recognitions.append(rec_info)
                 
                 # Draw green box
                 cv2.rectangle(img, (x, y), (x+w, y+h), (76, 175, 80), 2)
-                # Label box background
                 cv2.rectangle(img, (x, y - 25), (x+w, y), (76, 175, 80), -1)
-                cv2.putText(img, f"{name} ({round(confidence * 100, 1)}%)", (x + 5, y - 8),
+                cv2.putText(img, f"{name} ({round(conf * 100, 1)}%)", (x + 5, y - 8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
             else:
-                # Draw red box for Unknown
+                # Draw red box for Unknown or unassigned face
                 cv2.rectangle(img, (x, y), (x+w, y+h), (244, 67, 54), 2)
                 cv2.rectangle(img, (x, y - 25), (x+w, y), (244, 67, 54), -1)
                 cv2.putText(img, "Unknown", (x + 5, y - 8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
                 
+        conn.close()
+        
         annotated_b64 = face_rec.cv2_to_base64(img)
         return {
             "face_detected": face_detected,
-            "recognition": recognition_result,
+            "recognitions": recognitions,
+            "recognition": recognitions[0] if recognitions else None,
             "annotated_frame": annotated_b64
         }
     except Exception as e:
         print(f"Error processing frame: {e}")
-        return {"face_detected": False, "annotated_frame": frame_b64}
+        return {"face_detected": False, "recognitions": [], "recognition": None, "annotated_frame": frame_b64}
+
+# Global hardware camera handle
+hardware_cap = None
+
+def get_hardware_capture():
+    global hardware_cap
+    import cv2
+    if hardware_cap is None or not hardware_cap.isOpened():
+        settings = database.get_settings()
+        src_str = settings.get('camera_source', '0')
+        try:
+            src_idx = int(src_str)
+        except ValueError:
+            src_idx = src_str
+            
+        # DirectShow on Windows avoids camera driver hangs and dropped frames
+        if isinstance(src_idx, int) and os.name == 'nt' and hasattr(cv2, 'CAP_DSHOW'):
+            hardware_cap = cv2.VideoCapture(src_idx, cv2.CAP_DSHOW)
+        else:
+            hardware_cap = cv2.VideoCapture(src_idx)
+            
+        if hardware_cap is not None and hardware_cap.isOpened():
+            hardware_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            hardware_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            hardware_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return hardware_cap
+
+def read_hardware_frame():
+    cap = get_hardware_capture()
+    if cap is None or not cap.isOpened():
+        return None
+    # Retry up to 3 times to gracefully absorb transient dropped frames
+    for _ in range(3):
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            return frame
+    return None
+
+@app.get("/api/camera/raw_frame")
+def capture_raw_frame():
+    """Raw camera frame for registration preview without bounding boxes or attendance side-effects"""
+    frame = read_hardware_frame()
+    if frame is None:
+        raise HTTPException(status_code=500, detail="Failed to capture frame from hardware camera.")
+    b64_frame = face_rec.cv2_to_base64(frame)
+    return {"frame": b64_frame}
+
+@app.get("/api/camera/native_frame")
+def capture_native_frame():
+    frame = read_hardware_frame()
+    if frame is None:
+        raise HTTPException(status_code=500, detail="Failed to capture frame from hardware camera.")
+        
+    b64_frame = face_rec.cv2_to_base64(frame)
+    # Process frame through standard detection & recognition pipeline
+    return process_frame({"frame": b64_frame})
+
+@app.post("/api/camera/release")
+def release_hardware_camera():
+    global hardware_cap
+    if hardware_cap is not None:
+        try:
+            hardware_cap.release()
+        except Exception:
+            pass
+        hardware_cap = None
+    return {"message": "Hardware camera released."}
 
 @app.get("/api/settings")
 def get_settings():
@@ -288,7 +396,7 @@ def get_reports(date: str, course: str = "All"):
 
 @app.post("/api/retrain")
 def retrain_model():
-    success = load_and_train_recognizer()
+    success = load_and_train_recognizer(force=True)
     if not success:
         raise HTTPException(status_code=400, detail="Training failed. Make sure you have registered students with photos.")
     return {"message": "Model retrained successfully."}

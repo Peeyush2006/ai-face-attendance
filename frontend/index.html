@@ -223,6 +223,12 @@
                                 <button class="btn btn-primary" id="btn-capture" onclick="capturePhoto()" disabled>
                                     Capture Photo
                                 </button>
+                                <div class="upload-fallback-wrapper" style="margin-top: 8px; text-align: center;">
+                                    <input type="file" id="reg-file-upload" accept="image/*" multiple style="display: none;" onchange="handlePhotoUpload(event)">
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('reg-file-upload').click()">
+                                        <i class="fa-solid fa-cloud-arrow-up"></i> Upload Photos
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>

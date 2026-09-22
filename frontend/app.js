@@ -171,27 +171,126 @@ function sendNotification(studentName, attendanceRate) {
     showToast(`Email notification alert sent to ${studentName} (Current: ${attendanceRate})`, "success");
 }
 
+async function getCameraStream() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Camera API (getUserMedia) not supported in this browser or requires HTTPS / localhost.");
+    }
+    
+    // Progressive constraint attempts
+    const constraintList = [
+        { video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" } },
+        { video: { width: { ideal: 640 }, height: { ideal: 480 } } },
+        { video: true }
+    ];
+    
+    let lastError = null;
+    for (const constraints of constraintList) {
+        try {
+            return await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err) {
+            lastError = err;
+            if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+                // User explicitly denied permission, don't retry constraints
+                break;
+            }
+        }
+    }
+    throw lastError;
+}
+
 // ========================================================
 // SCREEN 1: STUDENT REGISTRATION LOGIC
 // ========================================================
+let isHardwareRegRunning = false;
+let hardwareRegInterval = null;
+
 async function startRegistrationCamera() {
     const video = document.getElementById("registration-video");
     const placeholder = document.getElementById("reg-camera-placeholder");
     const captureBtn = document.getElementById("btn-capture");
     
+    // First try browser media stream
     try {
-        registrationStream = await navigator.mediaDevices.getUserMedia({ 
-            video: { width: 640, height: 480, facingMode: "user" } 
-        });
+        registrationStream = await getCameraStream();
         video.srcObject = registrationStream;
+        await video.play().catch(() => {});
         placeholder.style.display = "none";
         captureBtn.disabled = false;
-        showToast("Camera access granted. Capturing enabled.", "success");
+        showToast("Browser camera active.", "success");
+        return;
     } catch (err) {
-        console.error(err);
-        showToast("Could not access camera. Simulating webcam feed...", "warning");
-        simulateRegistrationFeed();
+        console.warn("Browser camera unavailable, falling back to Native Hardware Camera:", err);
     }
+    
+    // Fallback directly to Native System Hardware Camera
+    try {
+        const testRes = await fetch(`${API_URL}/api/camera/native_frame`);
+        if (testRes.ok) {
+            startHardwareRegistrationFeed();
+            showToast("Connected to Native System Camera (OpenCV).", "success");
+            return;
+        }
+    } catch (err) {
+        console.warn("Hardware camera check failed:", err);
+    }
+    
+    showToast("No physical camera detected. Running in simulator mode.", "warning");
+    simulateRegistrationFeed();
+}
+
+function startHardwareRegistrationFeed() {
+    const placeholder = document.getElementById("reg-camera-placeholder");
+    placeholder.style.display = "none";
+    
+    const video = document.getElementById("registration-video");
+    video.style.display = "none";
+    
+    const canvas = document.getElementById("registration-canvas");
+    canvas.style.display = "block";
+    canvas.width = 640;
+    canvas.height = 480;
+    const ctx = canvas.getContext("2d");
+    
+    const captureBtn = document.getElementById("btn-capture");
+    captureBtn.disabled = false;
+    
+    isHardwareRegRunning = true;
+    let isFetching = false;
+    
+    hardwareRegInterval = setInterval(async () => {
+        if (isFetching || !isHardwareRegRunning) return;
+        isFetching = true;
+        try {
+            // Fetch clean raw frame without bounding boxes or attendance marks during registration
+            const res = await fetch(`${API_URL}/api/camera/raw_frame`);
+            if (res.ok) {
+                const data = await res.json();
+                if (data.frame) {
+                    const img = new Image();
+                    img.onload = () => {
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    };
+                    img.src = data.frame;
+                }
+            }
+        } catch (e) {
+            console.error("Hardware reg stream error:", e);
+        } finally {
+            isFetching = false;
+        }
+    }, 150);
+    
+    registrationStream = {
+        getTracks: () => [{
+            stop: () => {
+                isHardwareRegRunning = false;
+                if (hardwareRegInterval) clearInterval(hardwareRegInterval);
+                fetch(`${API_URL}/api/camera/release`, { method: "POST" }).catch(() => {});
+                canvas.style.display = "none";
+                video.style.display = "block";
+            }
+        }]
+    };
 }
 
 // Simulated webcam feed in case of headless or no-camera environment
@@ -273,37 +372,87 @@ function simulateRegistrationFeed() {
 function capturePhoto() {
     if (capturedPhotos.length >= TOTAL_PHOTOS_REQUIRED) return;
     
-    const canvas = document.getElementById("registration-canvas");
     const video = document.getElementById("registration-video");
-    const ctx = canvas.getContext("2d");
+    const displayCanvas = document.getElementById("registration-canvas");
     
-    canvas.width = 640;
-    canvas.height = 480;
+    // Use an isolated offscreen canvas to avoid wiping or disturbing the preview canvas
+    const offscreenCanvas = document.createElement("canvas");
+    offscreenCanvas.width = 640;
+    offscreenCanvas.height = 480;
+    const offCtx = offscreenCanvas.getContext("2d");
     
-    // Draw current video frame or use simulated canvas content
-    if (video.srcObject) {
-        // Mirror frame when capturing since video is mirrored
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform
-    } else {
-        // If simulation, capture the simulated canvas drawing
-        const simCanvas = document.getElementById("registration-canvas");
-        ctx.drawImage(simCanvas, 0, 0, canvas.width, canvas.height);
+    let captured = false;
+    
+    // Capture from active video stream
+    if (video && video.srcObject && video.readyState >= 2 && video.videoWidth > 0) {
+        offCtx.translate(offscreenCanvas.width, 0);
+        offCtx.scale(-1, 1);
+        offCtx.drawImage(video, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+        offCtx.setTransform(1, 0, 0, 1, 0, 0);
+        captured = true;
+    } else if (displayCanvas && displayCanvas.width > 0 && displayCanvas.height > 0) {
+        // Capture from visible hardware preview canvas or simulator
+        offCtx.drawImage(displayCanvas, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+        captured = true;
     }
     
-    const dataURL = canvas.toDataURL("image/jpeg");
+    if (!captured) {
+        showToast("Camera feed is not ready. Please start the camera and wait a moment.", "error");
+        return;
+    }
+    
+    // Verify that the captured frame is not completely black or empty
+    const imgData = offCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+    let brightnessSum = 0;
+    const sampleStep = 4 * 10;
+    for (let i = 0; i < imgData.data.length; i += sampleStep) {
+        brightnessSum += imgData.data[i] + imgData.data[i + 1] + imgData.data[i + 2];
+    }
+    const sampleCount = imgData.data.length / sampleStep;
+    const avgBrightness = brightnessSum / (sampleCount * 3);
+    
+    if (avgBrightness < 8) {
+        showToast("Captured photo is too dark or empty. Please check your camera.", "error");
+        return;
+    }
+    
+    const dataURL = offscreenCanvas.toDataURL("image/jpeg", 0.9);
     capturedPhotos.push(dataURL);
     
     updateCaptureProgress();
-    showToast(`Photo ${capturedPhotos.length} captured!`, "success");
+    showToast(`Photo ${capturedPhotos.length}/5 captured!`, "success");
     
     if (capturedPhotos.length === TOTAL_PHOTOS_REQUIRED) {
         document.getElementById("btn-capture").disabled = true;
         document.getElementById("btn-save-encode").disabled = false;
         showToast("5 photos captured successfully. Click Save & Encode.", "success");
     }
+}
+
+function handlePhotoUpload(event) {
+    const files = Array.from(event.target.files);
+    if (!files || files.length === 0) return;
+    
+    const remaining = TOTAL_PHOTOS_REQUIRED - capturedPhotos.length;
+    if (remaining <= 0) {
+        showToast("5 photos already collected. Click Clear to restart.", "info");
+        return;
+    }
+    
+    const toProcess = files.slice(0, remaining);
+    toProcess.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            capturedPhotos.push(e.target.result);
+            updateCaptureProgress();
+            if (capturedPhotos.length === TOTAL_PHOTOS_REQUIRED) {
+                document.getElementById("btn-capture").disabled = true;
+                document.getElementById("btn-save-encode").disabled = false;
+                showToast("5 photos loaded! Click Save & Encode.", "success");
+            }
+        };
+        reader.readAsDataURL(file);
+    });
 }
 
 function updateCaptureProgress() {
@@ -330,7 +479,7 @@ function clearRegistrationForm() {
     updateCaptureProgress();
     
     document.getElementById("btn-save-encode").disabled = true;
-    document.getElementById("btn-capture").disabled = registrationStream === null;
+    document.getElementById("btn-capture").disabled = (registrationStream === null && !isHardwareRegRunning);
 }
 
 async function saveAndEncodeStudent() {
@@ -387,6 +536,9 @@ async function saveAndEncodeStudent() {
 // ========================================================
 // SCREEN 2: LIVE ATTENDANCE (CAMERA) LOGIC
 // ========================================================
+let isHardwareAttRunning = false;
+let hardwareAttInterval = null;
+
 async function startAttendanceCamera() {
     const video = document.getElementById("attendance-video");
     const placeholder = document.getElementById("attendance-camera-placeholder");
@@ -397,22 +549,84 @@ async function startAttendanceCamera() {
     canvas.width = 640;
     canvas.height = 400;
     
+    // First try browser media stream
     try {
-        attendanceStream = await navigator.mediaDevices.getUserMedia({ 
-            video: { width: 640, height: 480, facingMode: "user" } 
-        });
+        attendanceStream = await getCameraStream();
         video.srcObject = attendanceStream;
+        await video.play().catch(() => {});
         placeholder.style.display = "none";
         scanOverlay.style.display = "flex";
         
         // Start streaming frames to API
         startProcessingFrames();
-        showToast("Live attendance feed activated.", "success");
+        showToast("Live attendance feed activated (Browser).", "success");
+        return;
     } catch (err) {
-        console.error(err);
-        showToast("Webcam access failed. Simulating live feed...", "warning");
-        simulateAttendanceFeed();
+        console.warn("Browser camera unavailable, falling back to Native Hardware Camera:", err);
     }
+    
+    // Fallback to Native System Hardware Camera (OpenCV)
+    try {
+        const testRes = await fetch(`${API_URL}/api/camera/native_frame`);
+        if (testRes.ok) {
+            placeholder.style.display = "none";
+            scanOverlay.style.display = "flex";
+            startHardwareAttendanceFeed();
+            showToast("Connected to Native System Camera (OpenCV).", "success");
+            return;
+        }
+    } catch (err) {
+        console.warn("Hardware attendance check failed:", err);
+    }
+    
+    showToast("No physical camera detected. Running in simulation mode.", "warning");
+    simulateAttendanceFeed();
+}
+
+function startHardwareAttendanceFeed() {
+    const canvas = document.getElementById("attendance-canvas");
+    const ctx = canvas.getContext("2d");
+    
+    isHardwareAttRunning = true;
+    let isFetching = false;
+    
+    hardwareAttInterval = setInterval(async () => {
+        if (isFetching || !isHardwareAttRunning) return;
+        isFetching = true;
+        try {
+            const res = await fetch(`${API_URL}/api/camera/native_frame`);
+            if (res.ok) {
+                const data = await res.json();
+                if (data.annotated_frame) {
+                    const img = new Image();
+                    img.onload = () => {
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    };
+                    img.src = data.annotated_frame;
+                }
+                
+                const recList = data.recognitions || (data.recognition ? [data.recognition] : []);
+                if (recList.length > 0) {
+                    handleRecognitions(recList);
+                }
+            }
+        } catch (e) {
+            console.error("Hardware att stream error:", e);
+        } finally {
+            isFetching = false;
+        }
+    }, 150);
+    
+    attendanceStream = {
+        getTracks: () => [{
+            stop: () => {
+                isHardwareAttRunning = false;
+                if (hardwareAttInterval) clearInterval(hardwareAttInterval);
+                fetch(`${API_URL}/api/camera/release`, { method: "POST" }).catch(() => {});
+                canvas.style.display = "none";
+            }
+        }]
+    };
 }
 
 function startProcessingFrames() {
@@ -458,9 +672,10 @@ function startProcessingFrames() {
                 img.src = data.annotated_frame;
             }
             
-            // Display success notification overlay if recognized
-            if (data.recognition) {
-                triggerSuccessAlert(data.recognition);
+            // Display success notification overlay for recognized faces
+            const recList = data.recognitions || (data.recognition ? [data.recognition] : []);
+            if (recList.length > 0) {
+                handleRecognitions(recList);
             }
         } catch (err) {
             console.error("Frame processing error:", err);
@@ -562,25 +777,52 @@ function simulateAttendanceFeed() {
 }
 
 let successAlertTimeout = null;
-function triggerSuccessAlert(matchData) {
+const recentAlerts = new Map();
+
+function handleRecognitions(recList) {
+    if (!recList || recList.length === 0) return;
+    
+    // Refresh today's logs dynamically in sidebar
+    loadTodayLog();
+    
+    const now = Date.now();
+    // Filter matches that are not within individual student cooldown (6 seconds)
+    const activeMatches = recList.filter(rec => {
+        const lastTime = recentAlerts.get(rec.student_id) || 0;
+        return (now - lastTime >= 6000);
+    });
+    
+    if (activeMatches.length === 0) return;
+    
+    activeMatches.forEach(rec => {
+        recentAlerts.set(rec.student_id, now);
+        showToast(`Attendance marked: ${rec.name} (${rec.confidence})`, "success");
+    });
+    
     const alertBox = document.getElementById("scan-success-alert");
     const nameEl = document.getElementById("success-student-info");
     const timeEl = document.getElementById("success-time");
     const confEl = document.getElementById("success-conf");
     
-    nameEl.innerText = `${matchData.name} — ${matchData.student_id}`;
-    timeEl.innerText = matchData.time;
-    confEl.innerText = matchData.confidence;
+    if (activeMatches.length === 1) {
+        const match = activeMatches[0];
+        nameEl.innerText = `${match.name} — ${match.student_id}`;
+        timeEl.innerText = match.time;
+        confEl.innerText = match.confidence;
+    } else {
+        nameEl.innerText = activeMatches.map(m => m.name).join(" & ");
+        timeEl.innerText = activeMatches[0].time;
+        confEl.innerText = activeMatches.map(m => `${m.name.split(' ')[0]}: ${m.confidence}`).join(" · ");
+    }
     
     alertBox.style.display = "flex";
-    
-    // Refresh today's logs dynamically in sidebar
-    loadTodayLog();
+    alertBox.style.opacity = "1";
+    alertBox.style.transform = "translateY(0)";
     
     // Clear existing timeout
     if (successAlertTimeout) clearTimeout(successAlertTimeout);
     
-    // Hide alert after 4 seconds
+    // Hide alert after 4.5 seconds
     successAlertTimeout = setTimeout(() => {
         alertBox.style.opacity = "0";
         alertBox.style.transform = "translateY(10px)";
@@ -590,7 +832,12 @@ function triggerSuccessAlert(matchData) {
             alertBox.style.opacity = "1";
             alertBox.style.transform = "translateY(0)";
         }, 400);
-    }, 4000);
+    }, 4500);
+}
+
+function triggerSuccessAlert(matchData) {
+    if (!matchData) return;
+    handleRecognitions([matchData]);
 }
 
 async function loadTodayLog() {
