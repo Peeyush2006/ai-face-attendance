@@ -139,65 +139,56 @@ class EigenfaceRecognizer:
         
         # 1. Project onto the eigenfaces space
         q_proj = q_centered @ self.eigenfaces
-        
+        q_proj_norm = float(np.linalg.norm(q_proj))
+        if q_proj_norm < 1e-6:
+            return None, float('inf'), 0.0
+            
         # 2. Compute Reconstruction Residual (Distance to Face Space)
         q_recon_centered = q_proj @ self.eigenfaces.T
         recon_error = float(np.linalg.norm(q_centered - q_recon_centered) / np.sqrt(D))
         
-        # 3. Find closest training projection candidate
+        # 3. Normalized PCA Cosine Similarities against all enrolled projections
+        proj_norms = np.linalg.norm(self.projections, axis=1)
+        cos_sims = (self.projections @ q_proj) / (proj_norms * q_proj_norm + 1e-10)
         distances = np.linalg.norm(self.projections - q_proj, axis=1)
-        min_idx = int(np.argmin(distances))
-        min_sample_dist = float(distances[min_idx])
-        candidate_label = self.labels[min_idx]
         
-        # Candidate's class centroid and allowable radius in PCA space
-        candidate_centroid = self.class_centroids.get(candidate_label)
-        if candidate_centroid is not None:
-            centroid_dist = float(np.linalg.norm(q_proj - candidate_centroid))
-        else:
-            centroid_dist = min_sample_dist
+        # Group by student class
+        unique_labels = list(dict.fromkeys(self.labels))
+        class_scores = {}
+        for l in unique_labels:
+            idxs = [i for i, lab in enumerate(self.labels) if lab == l]
+            best_c = float(np.max(cos_sims[idxs]))
+            min_d = float(np.min(distances[idxs]))
+            class_scores[l] = (best_c, min_d)
             
-        allowable_pca_dist = self.class_radii.get(candidate_label, 2500.0)
+        sorted_students = sorted(unique_labels, key=lambda l: class_scores[l][0], reverse=True)
+        candidate_label = sorted_students[0]
+        best_cos, min_sample_dist = class_scores[candidate_label]
+        second_cos = class_scores[sorted_students[1]][0] if len(sorted_students) > 1 else -1.0
         
-        # 4. Compare with candidate's image template & cosine similarity
-        template = self.class_mean_faces.get(candidate_label, self.mean_face)
-        img_dist = float(np.linalg.norm(q - template) / np.sqrt(D))
+        allowable_recon = max(self.max_recon_error, 75.0)
         
-        q_norm = np.linalg.norm(q)
-        t_norm = np.linalg.norm(template)
-        if q_norm > 1e-6 and t_norm > 1e-6:
-            cos_sim = float(np.dot(q, template) / (q_norm * t_norm))
-        else:
-            cos_sim = 0.0
-            
-        # Maximum allowed thresholds for the candidate class
-        allowable_recon = max(self.max_recon_error, 35.0)
-        allowable_img_dist = max(self.class_img_radii.get(candidate_label, 25.0) * 1.8, 48.0)
+        # Confidence score components based on PCA manifold alignment and distance
+        conf_cos = max(0.0, min(1.0, (best_cos - 0.35) / 0.60))
+        conf_dist = max(0.0, min(1.0, 1.0 - (min_sample_dist - 500.0) / 4000.0))
+        conf_recon = max(0.0, min(1.0, 1.0 - (recon_error / allowable_recon)))
         
-        # Confidence score components in [0, 1]
-        # Primary factor: PCA projection distance to the enrolled class
-        conf_pca = max(0.0, 1.0 - (min_sample_dist / allowable_pca_dist))
-        conf_recon = max(0.0, 1.0 - (recon_error / allowable_recon))
-        conf_img = max(0.0, 1.0 - (img_dist / allowable_img_dist))
-        conf_cos = max(0.0, (cos_sim - 0.60) / 0.40) if cos_sim >= 0.60 else 0.0
+        confidence = float(0.60 * conf_cos + 0.25 * conf_dist + 0.15 * conf_recon)
         
-        # Composite confidence: heavily weighted by PCA projection distance
-        confidence = float(0.45 * conf_pca + 0.25 * conf_img + 0.20 * conf_recon + 0.10 * conf_cos)
+        # Rejection Criteria (Stranger Detection & Ambiguity Prevention):
+        # 1. Cosine similarity in PCA face space must show clear structural correlation (>= 0.68)
+        # 2. Multi-class margin: if not extremely confident, must clearly beat the 2nd best candidate
+        # 3. Excessive reconstruction error: non-face or foreign artifact
+        # 4. Excessive Euclidean distance: outside candidate cluster boundary
+        # 5. Below requested confidence threshold
+        is_stranger = (
+            best_cos < 0.68 or
+            (len(unique_labels) > 1 and best_cos < 0.85 and (best_cos - second_cos) < 0.10) or
+            recon_error > allowable_recon or
+            min_sample_dist > 4500.0 or
+            confidence < threshold
+        )
         
-        # Strict Rejection Criteria:
-        # 1. PCA distance exceeds allowable radius -> not the enrolled candidate
-        # 2. Centroid distance exceeds allowable radius -> not within class cluster
-        # 3. High reconstruction error -> face doesn't match facial manifold
-        # 4. High image distance -> visual appearance differs from enrolled student
-        # 5. Low cosine similarity -> angle in image space is dissimilar
-        # 6. Overall confidence is below required threshold
-        is_stranger = (min_sample_dist > allowable_pca_dist or
-                       centroid_dist > allowable_pca_dist * 1.30 or
-                       recon_error > allowable_recon or 
-                       (img_dist > allowable_img_dist and min_sample_dist > allowable_pca_dist * 0.5) or 
-                       cos_sim < 0.65 or 
-                       confidence < threshold)
-                       
         if is_stranger:
             return None, min_sample_dist, confidence
             
@@ -259,45 +250,106 @@ class EigenfaceRecognizer:
             print(f"Error loading model: {e}")
             return False
 
-# Initialize Haar Cascade face detector with dynamic fallbacks
+# Base directory path for models
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_YUNET_PATH = os.path.join(_BASE_DIR, 'data', 'models', 'face_detection_yunet_2023mar.onnx')
+
+# Initialize YuNet Deep Learning face detector (Primary, works with OpenCV 4.x and 5.x)
+detector_yunet = None
+if hasattr(cv2, 'FaceDetectorYN_create') and os.path.exists(_YUNET_PATH):
+    try:
+        detector_yunet = cv2.FaceDetectorYN_create(
+            _YUNET_PATH, "", (320, 320),
+            score_threshold=0.40,
+            nms_threshold=0.3
+        )
+        print("[face_rec] YuNet deep-learning face detector initialized successfully.")
+    except Exception as e:
+        print("[face_rec] Could not initialize YuNet detector:", e)
+        detector_yunet = None
+
+# Initialize Haar Cascade face detector (Secondary fallback)
 face_cascade = None
 try:
     if hasattr(cv2, 'CascadeClassifier'):
-        # Try standard OpenCV package data
         if hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
             xml_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
             if os.path.exists(xml_path):
                 face_cascade = cv2.CascadeClassifier(xml_path)
         
-        # Fallback to local file check or manual cascade initialization if not already loaded
         if face_cascade is None or face_cascade.empty():
             face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-    else:
-        print("WARNING: cv2 has no attribute 'CascadeClassifier'. Running in no-opencv fallback mode.")
 except Exception as e:
-    print("WARNING: Failed to load Haar Cascade face detector:", e)
     face_cascade = None
 
-def detect_faces(gray_img):
+def detect_faces(img):
     """
-    Detects faces in a grayscale image.
+    Detects faces in an image (accepts BGR or grayscale numpy arrays).
     returns: list of bounding boxes (x, y, w, h)
     """
-    if face_cascade is None or face_cascade.empty():
-        return []
-    try:
-        faces = face_cascade.detectMultiScale(gray_img, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-        return faces
-    except Exception as e:
-        print("ERROR running detectMultiScale:", e)
+    if img is None or img.size == 0:
         return []
 
-def preprocess_face(gray_img, bbox, size=(128, 128)):
+    if len(img.shape) == 2:
+        h, w = img.shape
+        bgr_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        gray_img = img
+    else:
+        h, w = img.shape[:2]
+        bgr_img = img
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # 1. Primary: YuNet Deep Learning detector
+    if detector_yunet is not None:
+        try:
+            detector_yunet.setInputSize((w, h))
+            _, faces = detector_yunet.detect(bgr_img)
+            if faces is not None and len(faces) > 0:
+                result = []
+                for f in faces:
+                    x = max(0, int(round(f[0])))
+                    y = max(0, int(round(f[1])))
+                    bw = max(1, min(w - x, int(round(f[2]))))
+                    bh = max(1, min(h - y, int(round(f[3]))))
+                    if bw > 15 and bh > 15:
+                        result.append((x, y, bw, bh))
+                if len(result) > 0:
+                    return result
+        except Exception as e:
+            print("[face_rec] YuNet detection error:", e)
+
+    # 2. Secondary fallback: Haar Cascade
+    if face_cascade is not None and not face_cascade.empty():
+        try:
+            faces = face_cascade.detectMultiScale(gray_img, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+            if len(faces) > 0:
+                return [(int(x), int(y), int(bw), int(bh)) for (x, y, bw, bh) in faces]
+        except Exception as e:
+            print("[face_rec] Haar cascade detection error:", e)
+
+    return []
+
+def preprocess_face(img, bbox, size=(128, 128)):
     """
     Crops, resizes, and normalizes a face based on its bounding box.
+    Accepts grayscale or BGR images.
     """
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+
+    h_img, w_img = gray.shape[:2]
     x, y, w, h = bbox
-    cropped = gray_img[y:y+h, x:x+w]
+    x = max(0, min(int(x), w_img - 1))
+    y = max(0, min(int(y), h_img - 1))
+    w = max(1, min(int(w), w_img - x))
+    h = max(1, min(int(h), h_img - y))
+
+    cropped = gray[y:y+h, x:x+w]
+    if cropped.size == 0:
+        cropped = gray
+
     resized = cv2.resize(cropped, size, interpolation=cv2.INTER_AREA)
     # Perform histogram equalization to normalize lighting conditions
     equalized = cv2.equalizeHist(resized)

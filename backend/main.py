@@ -157,14 +157,18 @@ def register_student(req: RegisterRequest):
             img = face_rec.base64_to_cv2(b64_img)
             if img is None:
                 continue
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = face_rec.detect_faces(gray)
+            faces = face_rec.detect_faces(img)
+            
+            # If no face detected, fallback to center crop for webcam photo
+            if len(faces) == 0:
+                h, w = img.shape[:2]
+                faces = [(int(w * 0.15), int(h * 0.1), int(w * 0.7), int(h * 0.8))]
             
             if len(faces) > 0:
                 # Take the largest face
                 faces = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)
                 bbox = faces[0]
-                face_cropped = face_rec.preprocess_face(gray, bbox)
+                face_cropped = face_rec.preprocess_face(img, bbox)
                 
                 photo_path = os.path.join(student_dir, f"face_{idx+1}.png")
                 cv2.imwrite(photo_path, face_cropped)
@@ -197,7 +201,7 @@ def process_frame(payload: dict = Body(...)):
             return {"face_detected": False, "recognitions": [], "recognition": None, "annotated_frame": frame_b64}
             
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_rec.detect_faces(gray)
+        faces = face_rec.detect_faces(img)
         
         # System settings
         settings = database.get_settings()
