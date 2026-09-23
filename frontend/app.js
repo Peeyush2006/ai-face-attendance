@@ -605,7 +605,8 @@ function startHardwareAttendanceFeed() {
                     img.src = data.annotated_frame;
                 }
                 
-                const recList = data.recognitions || (data.recognition ? [data.recognition] : []);
+                const allRecs = data.recognitions || (data.recognition ? [data.recognition] : []);
+                const recList = allRecs.filter(r => r.recognized && r.student_id);
                 if (recList.length > 0) {
                     handleRecognitions(recList);
                 }
@@ -635,8 +636,8 @@ function startProcessingFrames() {
     const ctx = canvas.getContext("2d");
     
     const hiddenCanvas = document.createElement("canvas");
-    hiddenCanvas.width = 320; // Downscale frame for speed
-    hiddenCanvas.height = 240;
+    hiddenCanvas.width = 640; // Full resolution for reliable multi-face detection
+    hiddenCanvas.height = 480;
     const hCtx = hiddenCanvas.getContext("2d");
     
     let isProcessing = false;
@@ -650,9 +651,12 @@ function startProcessingFrames() {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         
-        // Draw frame to hidden processing canvas
+        // Draw frame to hidden processing canvas (mirrored to match preview & registration)
+        hCtx.translate(hiddenCanvas.width, 0);
+        hCtx.scale(-1, 1);
         hCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-        const dataURL = hiddenCanvas.toDataURL("image/jpeg", 0.6); // Compress
+        hCtx.setTransform(1, 0, 0, 1, 0, 0);
+        const dataURL = hiddenCanvas.toDataURL("image/jpeg", 0.85); // Crisp quality for facial features
         
         isProcessing = true;
         try {
@@ -672,8 +676,9 @@ function startProcessingFrames() {
                 img.src = data.annotated_frame;
             }
             
-            // Display success notification overlay for recognized faces
-            const recList = data.recognitions || (data.recognition ? [data.recognition] : []);
+            // Display success notification overlay ONLY for recognized faces
+            const allRecs = data.recognitions || (data.recognition ? [data.recognition] : []);
+            const recList = allRecs.filter(r => r.recognized && r.student_id);
             if (recList.length > 0) {
                 handleRecognitions(recList);
             }
@@ -726,35 +731,24 @@ function simulateAttendanceFeed() {
         const fbx = bx + offset;
         const fby = by + offset / 2;
         
-        // Simulated green/red bounding box
-        const isRecognized = (frameCount % 60) > 40; // Simulate match state periodically
-        if (isRecognized) {
-            ctx.strokeStyle = "#4caf50";
-            ctx.fillStyle = "#4caf50";
-            ctx.lineWidth = 3;
-            ctx.strokeRect(fbx, fby, bw, bh);
-            ctx.fillRect(fbx, fby - 25, bw, 25);
-            ctx.fillStyle = "#fff";
-            ctx.font = "12px Outfit";
-            ctx.fillText("Peeyush Kumar Tiwari (98.2%)", fbx + 8, fby - 8);
-            
-            // Trigger UI match event once per cycle
-            if (frameCount % 60 === 41) {
-                const now = new Date();
-                triggerSuccessAlert({
-                    student_id: "2401151028",
-                    name: "Peeyush Kumar Tiwari",
-                    course_section: "BCA — Section A",
-                    time: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                    confidence: "98.2%",
-                    status: "Present"
-                });
-            }
-        } else {
-            ctx.strokeStyle = "rgba(139, 92, 246, 0.5)";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(fbx, fby, bw, bh);
-        }
+        // Neutral scanning wireframe (no fake matches or hardcoded attendance)
+        ctx.strokeStyle = "rgba(139, 92, 246, 0.6)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(fbx, fby, bw, bh);
+        
+        // Reticle corners
+        ctx.strokeStyle = "#8b5cf6";
+        ctx.lineWidth = 3;
+        const cl = 15;
+        ctx.beginPath(); ctx.moveTo(fbx, fby + cl); ctx.lineTo(fbx, fby); ctx.lineTo(fbx + cl, fby); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(fbx + bw - cl, fby); ctx.lineTo(fbx + bw, fby); ctx.lineTo(fbx + bw, fby + cl); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(fbx, fby + bh - cl); ctx.lineTo(fbx, fby + bh); ctx.lineTo(fbx + cl, fby + bh); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(fbx + bw - cl, fby + bh); ctx.lineTo(fbx + bw, fby + bh); ctx.lineTo(fbx + bw, fby + bh - cl); ctx.stroke();
+        
+        // Status text
+        ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+        ctx.font = "12px Inter";
+        ctx.fillText("Camera offline · Simulation mode", fbx - 15, fby + bh + 25);
         
         // Simulator banner
         ctx.fillStyle = "#f59e0b";
@@ -786,8 +780,9 @@ function handleRecognitions(recList) {
     loadTodayLog();
     
     const now = Date.now();
-    // Filter matches that are not within individual student cooldown (6 seconds)
+    // Filter matches that are recognized and not within individual student cooldown (6 seconds)
     const activeMatches = recList.filter(rec => {
+        if (!rec.recognized || !rec.student_id) return false;
         const lastTime = recentAlerts.get(rec.student_id) || 0;
         return (now - lastTime >= 6000);
     });
@@ -807,11 +802,11 @@ function handleRecognitions(recList) {
     if (activeMatches.length === 1) {
         const match = activeMatches[0];
         nameEl.innerText = `${match.name} — ${match.student_id}`;
-        timeEl.innerText = match.time;
+        timeEl.innerText = match.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         confEl.innerText = match.confidence;
     } else {
-        nameEl.innerText = activeMatches.map(m => m.name).join(" & ");
-        timeEl.innerText = activeMatches[0].time;
+        nameEl.innerText = activeMatches.map(m => `${m.name} (${m.student_id})`).join(" & ");
+        timeEl.innerText = activeMatches[0].time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         confEl.innerText = activeMatches.map(m => `${m.name.split(' ')[0]}: ${m.confidence}`).join(" · ");
     }
     

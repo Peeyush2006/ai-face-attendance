@@ -1,4 +1,11 @@
 import os
+import sys
+
+# Ensure backend directory is in sys.path
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 import datetime
 import uvicorn
 from zoneinfo import ZoneInfo
@@ -36,6 +43,58 @@ app.add_middleware(
 
 # Global recognizer instance
 recognizer = face_rec.EigenfaceRecognizer(num_components=50, img_size=(128, 128))
+
+class TemporalAttendanceTracker:
+    """
+    Stabilizes face recognition over consecutive frames.
+    Requires an identity to be recognized in at least required_consecutive frames
+    before marking attendance. Prevents single-frame glitches from creating attendance.
+    Also caches attendance marked in the current session/day to avoid repeated DB writes.
+    """
+    def __init__(self, required_consecutive=2, timeout_seconds=2.5):
+        self.required_consecutive = required_consecutive
+        self.timeout_seconds = timeout_seconds
+        self.candidate_streaks = {}  # student_id -> {"count": int, "last_seen": float}
+        self.marked_today = set()     # (student_id, date_str)
+        
+    def update(self, recognized_student_ids, today_str):
+        import time
+        now = time.time()
+        ready_to_mark = []
+        
+        # Age out old streaks
+        stale_keys = [sid for sid, data in self.candidate_streaks.items() if now - data["last_seen"] > self.timeout_seconds]
+        for sid in stale_keys:
+            del self.candidate_streaks[sid]
+            
+        # Update current recognized
+        for sid in recognized_student_ids:
+            if sid not in self.candidate_streaks:
+                self.candidate_streaks[sid] = {"count": 1, "last_seen": now}
+            else:
+                self.candidate_streaks[sid]["count"] += 1
+                self.candidate_streaks[sid]["last_seen"] = now
+                
+            streak = self.candidate_streaks[sid]["count"]
+            already_marked = (sid, today_str) in self.marked_today
+            
+            if streak >= self.required_consecutive and not already_marked:
+                ready_to_mark.append(sid)
+                self.marked_today.add((sid, today_str))
+                
+        # Reset streaks for students not present in this frame
+        current_set = set(recognized_student_ids)
+        for sid in list(self.candidate_streaks.keys()):
+            if sid not in current_set and (sid, today_str) not in self.marked_today:
+                self.candidate_streaks[sid]["count"] = max(0, self.candidate_streaks[sid]["count"] - 1)
+                
+        return ready_to_mark
+
+    def reset(self):
+        self.candidate_streaks.clear()
+        self.marked_today.clear()
+
+temporal_tracker = TemporalAttendanceTracker(required_consecutive=2, timeout_seconds=2.5)
 
 def load_and_train_recognizer(force: bool = False):
     global recognizer
@@ -99,6 +158,9 @@ def load_and_train_recognizer(force: bool = False):
     print("PCA Model training failed (insufficient images).")
     return False
 
+# Initialize and load model on module load
+load_and_train_recognizer()
+
 # Pydantic schemas
 class RegisterRequest(BaseModel):
     student_id: str
@@ -138,55 +200,78 @@ def register_student(req: RegisterRequest):
     if len(req.photos) != 5:
         raise HTTPException(status_code=400, detail="Exactly 5 photos are required.")
     
-    # Clean student ID (replace slashes for filename safety)
-    safe_sid = req.student_id.replace('/', '_')
-    student_dir = os.path.join(FACES_DIR, safe_sid)
-    os.makedirs(student_dir, exist_ok=True)
-    
-    # Save student in database
-    success = database.add_student(req.student_id, req.name, req.course_section)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to save student record to database.")
+    sid_clean = req.student_id.strip()
+    name_clean = req.name.strip()
+    if not sid_clean or not name_clean:
+        raise HTTPException(status_code=400, detail="Student ID and Full Name are required.")
         
-    saved_photos_count = 0
+    safe_sid = sid_clean.replace('/', '_')
+    student_dir = os.path.join(FACES_DIR, safe_sid)
+    
+    # 1. Strictly decode and validate each of the 5 photos for valid face presence
+    processed_face_crops = []
     import cv2
     import numpy as np
     
     for idx, b64_img in enumerate(req.photos):
         try:
             img = face_rec.base64_to_cv2(b64_img)
-            if img is None:
-                continue
-            faces = face_rec.detect_faces(img)
+            if img is None or img.size == 0:
+                raise HTTPException(status_code=400, detail=f"Photo {idx+1} could not be decoded. Please provide valid image data.")
             
-            # If no face detected, fallback to center crop for webcam photo
-            if len(faces) == 0:
-                h, w = img.shape[:2]
-                faces = [(int(w * 0.15), int(h * 0.1), int(w * 0.7), int(h * 0.8))]
+            # Detect faces with registration quality requirement (min 45x45 px)
+            detected_boxes = face_rec.detect_faces(img, min_size=45, strict_quality=True)
             
-            if len(faces) > 0:
-                # Take the largest face
-                faces = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)
-                bbox = faces[0]
-                face_cropped = face_rec.preprocess_face(img, bbox)
+            if len(detected_boxes) == 0:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"No valid face detected in photo {idx+1}. Arbitrary objects or non-faces cannot be registered. Please face the camera directly with good lighting."
+                )
+            if len(detected_boxes) > 1:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Multiple faces ({len(detected_boxes)}) detected in photo {idx+1}. Exactly one face must be present during registration."
+                )
                 
-                photo_path = os.path.join(student_dir, f"face_{idx+1}.png")
-                cv2.imwrite(photo_path, face_cropped)
+            bbox = detected_boxes[0]
+            face_crop = face_rec.preprocess_face(img, bbox)
+            
+            # Verify crop quality
+            is_valid, reason = face_rec.validate_face_quality(face_crop, min_size=40, min_blur=16.0)
+            if not is_valid:
+                raise HTTPException(status_code=400, detail=f"Photo {idx+1} failed quality check ({reason}). Please capture a clear, non-blurred face.")
                 
-                # Add to DB
-                database.add_student_photo(req.student_id, photo_path)
-                saved_photos_count += 1
+            processed_face_crops.append(face_crop)
+        except HTTPException:
+            raise
         except Exception as e:
-            print(f"Error processing registration image {idx+1}: {e}")
+            raise HTTPException(status_code=400, detail=f"Error analyzing registration photo {idx+1}: {str(e)}")
             
-    if saved_photos_count < 3:
-        # Rollback or warning, but let's require at least 3 successful face encodings
-        raise HTTPException(status_code=400, detail=f"Could only detect faces in {saved_photos_count}/5 photos. Please capture again in better lighting.")
-        
-    # Force clean retrain of model with the new student's photos
-    load_and_train_recognizer(force=True)
+    # All 5 photos passed strict validation!
+    # Clean previous student photos on disk and database to prevent stale / duplicate data
+    os.makedirs(student_dir, exist_ok=True)
+    for fname in os.listdir(student_dir):
+        if fname.endswith(('.png', '.jpg', '.jpeg')):
+            try:
+                os.remove(os.path.join(student_dir, fname))
+            except Exception:
+                pass
+                
+    database.delete_student_photos(sid_clean)
     
-    return {"message": f"Student registered successfully. {saved_photos_count} face encodings saved."}
+    # Save student in database
+    success = database.add_student(sid_clean, name_clean, req.course_section)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to save student record to database.")
+        
+    for idx, face_crop in enumerate(processed_face_crops):
+        photo_path = os.path.join(student_dir, f"face_{idx+1}.png")
+        cv2.imwrite(photo_path, face_crop)
+        database.add_student_photo(sid_clean, photo_path)
+        
+    # Retrain model cleanly with new student photos
+    load_and_train_recognizer(force=True)
+    return {"message": f"Student '{name_clean}' registered successfully. 5 verified face encodings saved."}
 
 @app.post("/api/process_frame")
 def process_frame(payload: dict = Body(...)):
@@ -198,53 +283,69 @@ def process_frame(payload: dict = Body(...)):
     try:
         img = face_rec.base64_to_cv2(frame_b64)
         if img is None:
-            return {"face_detected": False, "recognitions": [], "recognition": None, "annotated_frame": frame_b64}
+            return {"face_detected": False, "faces_count": 0, "recognitions": [], "recognition": None, "annotated_frame": frame_b64}
             
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_rec.detect_faces(img)
+        detected_faces = face_rec.detect_faces(img, min_size=36, strict_quality=True)
         
         # System settings
         settings = database.get_settings()
         threshold_setting = float(settings.get('threshold', 0.50))
         late_threshold_mins = int(settings.get('late_threshold', 15))
         
-        face_detected = len(faces) > 0
-        recognitions = []
-        
-        # Determine current time & late status
         tz = ZoneInfo("Asia/Kolkata")
         now = datetime.datetime.now(tz)
+        today_str = database.get_ist_today().isoformat()
         class_start = now.replace(hour=10, minute=15, second=0, microsecond=0)
         late_cutoff = class_start + datetime.timedelta(minutes=late_threshold_mins)
         status = 'Late' if now > late_cutoff else 'Present'
         time_str = now.strftime('%H:%M')
         
-        conn = database.get_db_connection()
-        
-        # 1. First pass: predict each face candidate
-        predictions = []
-        for bbox in faces:
+        if len(detected_faces) == 0:
+            # No face detected in frame
+            annotated_b64 = face_rec.cv2_to_base64(img)
+            return {
+                "face_detected": False,
+                "faces_count": 0,
+                "recognitions": [],
+                "recognition": None,
+                "annotated_frame": annotated_b64
+            }
+            
+        # 1. Independent recognition prediction for EVERY detected face
+        face_candidates = []
+        for bbox in detected_faces:
             x, y, w, h = bbox
-            face_img = face_rec.preprocess_face(gray, bbox)
-            student_id, distance, confidence = recognizer.predict(face_img, threshold=threshold_setting)
-            predictions.append({
+            face_crop = face_rec.preprocess_face(gray, bbox)
+            
+            # Predict canonical and mirrored face
+            sid1, dist1, conf1 = recognizer.predict(face_crop, threshold=threshold_setting)
+            face_crop_flip = cv2.flip(face_crop, 1)
+            sid2, dist2, conf2 = recognizer.predict(face_crop_flip, threshold=threshold_setting)
+            
+            if conf2 > conf1:
+                student_id, distance, confidence = sid2, dist2, conf2
+            else:
+                student_id, distance, confidence = sid1, dist1, conf1
+                
+            face_candidates.append({
                 "bbox": (int(x), int(y), int(w), int(h)),
                 "student_id": student_id,
                 "distance": distance,
                 "confidence": confidence
             })
             
-        # 2. Enforce 1-to-1 matching:
-        # A student cannot appear as two distinct physical faces in the same camera frame.
-        # Prioritize assigning the student ID to the face with the highest confidence.
+        # 2. Enforce 1-to-1 matching constraint:
+        # The same student cannot be two physically distinct faces in the same video frame.
+        # Assign student identity to the face with the highest confidence.
         assigned_students = set()
-        sorted_indices = sorted(range(len(predictions)), key=lambda i: predictions[i]["confidence"], reverse=True)
+        sorted_indices = sorted(range(len(face_candidates)), key=lambda i: face_candidates[i]["confidence"], reverse=True)
         final_assignments = {}
         
         for idx in sorted_indices:
-            pred = predictions[idx]
-            sid = pred["student_id"]
-            conf = pred["confidence"]
+            cand = face_candidates[idx]
+            sid = cand["student_id"]
+            conf = cand["confidence"]
             
             if sid and conf >= threshold_setting and sid not in assigned_students:
                 assigned_students.add(sid)
@@ -252,54 +353,95 @@ def process_frame(payload: dict = Body(...)):
             else:
                 final_assignments[idx] = (None, conf)
                 
-        # 3. Draw annotations and record attendance for uniquely matched faces
-        for idx, pred in enumerate(predictions):
-            x, y, w, h = pred["bbox"]
+        # 3. Build independent face recognition objects and annotate frame
+        conn = database.get_db_connection()
+        recognitions = []
+        conf_by_sid = {}
+        
+        for idx, cand in enumerate(face_candidates):
+            x, y, w, h = cand["bbox"]
             matched_sid, conf = final_assignments[idx]
             
             if matched_sid:
                 row = conn.execute('SELECT name, course_section FROM students WHERE student_id = ?', (matched_sid,)).fetchone()
                 name = row['name'] if row else matched_sid
                 course_section = row['course_section'] if row else ""
-                
-                # Mark attendance once per recognized student
-                database.mark_attendance(matched_sid, status, time_str, conf * 100)
+                conf_by_sid[matched_sid] = conf
                 
                 rec_info = {
+                    "box": [x, y, w, h],
+                    "face_box": [x, y, w, h],
                     "student_id": matched_sid,
+                    "student_name": name,
                     "name": name,
                     "course_section": course_section,
-                    "time": time_str,
                     "confidence": f"{round(conf * 100, 1)}%",
+                    "confidence_value": round(float(conf), 3),
+                    "recognized": True,
                     "status": status,
-                    "bbox": [x, y, w, h]
+                    "time": time_str
                 }
                 recognitions.append(rec_info)
                 
-                # Draw green box
+                # Draw green bounding box & 2-line label banner
                 cv2.rectangle(img, (x, y), (x+w, y+h), (76, 175, 80), 2)
-                cv2.rectangle(img, (x, y - 25), (x+w, y), (76, 175, 80), -1)
-                cv2.putText(img, f"{name} ({round(conf * 100, 1)}%)", (x + 5, y - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                banner_h = 36
+                banner_y = max(0, y - banner_h)
+                cv2.rectangle(img, (x, banner_y), (x+w, y), (76, 175, 80), -1)
+                cv2.putText(img, f"Name: {name}", (x + 4, banner_y + 14),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(img, f"Status: Recognized ({round(conf * 100, 1)}%)", (x + 4, banner_y + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
             else:
-                # Draw red box for Unknown or unassigned face
+                # Unknown / rejected face
+                rec_info = {
+                    "box": [x, y, w, h],
+                    "face_box": [x, y, w, h],
+                    "student_id": None,
+                    "student_name": "Unknown",
+                    "name": "Unknown",
+                    "course_section": "",
+                    "confidence": f"{round(conf * 100, 1)}%",
+                    "confidence_value": round(float(conf), 3),
+                    "recognized": False,
+                    "status": "Not recognized",
+                    "time": ""
+                }
+                recognitions.append(rec_info)
+                
+                # Draw red bounding box & 2-line label banner
                 cv2.rectangle(img, (x, y), (x+w, y+h), (244, 67, 54), 2)
-                cv2.rectangle(img, (x, y - 25), (x+w, y), (244, 67, 54), -1)
-                cv2.putText(img, "Unknown", (x + 5, y - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                banner_h = 36
+                banner_y = max(0, y - banner_h)
+                cv2.rectangle(img, (x, banner_y), (x+w, y), (244, 67, 54), -1)
+                cv2.putText(img, "Name: Unknown", (x + 4, banner_y + 14),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(img, "Status: Not recognized", (x + 4, banner_y + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
                 
         conn.close()
         
+        # 4. Temporal Stabilization & Attendance Logging:
+        # Only mark attendance when a student is recognized consistently across consecutive frames
+        recognized_sids = [r["student_id"] for r in recognitions if r["recognized"] and r["student_id"]]
+        ready_to_mark = temporal_tracker.update(recognized_sids, today_str)
+        
+        for sid in ready_to_mark:
+            c_val = conf_by_sid.get(sid, 0.90)
+            database.mark_attendance(sid, status, time_str, c_val * 100)
+            print(f"[Attendance] Successfully recorded attendance for {sid} (Confidence: {round(c_val*100, 1)}%)")
+            
         annotated_b64 = face_rec.cv2_to_base64(img)
         return {
-            "face_detected": face_detected,
+            "face_detected": len(recognitions) > 0,
+            "faces_count": len(recognitions),
             "recognitions": recognitions,
-            "recognition": recognitions[0] if recognitions else None,
+            "recognition": next((r for r in recognitions if r["recognized"]), (recognitions[0] if recognitions else None)),
             "annotated_frame": annotated_b64
         }
     except Exception as e:
         print(f"Error processing frame: {e}")
-        return {"face_detected": False, "recognitions": [], "recognition": None, "annotated_frame": frame_b64}
+        return {"face_detected": False, "faces_count": 0, "recognitions": [], "recognition": None, "annotated_frame": frame_b64}
 
 # Global hardware camera handle
 hardware_cap = None

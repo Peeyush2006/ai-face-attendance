@@ -66,7 +66,7 @@ def init_db():
     
     # Seed default settings
     default_settings = {
-        'threshold': '0.50',
+        'threshold': '0.60',
         'late_threshold': '15',
         'camera_source': '0',
         'email_alerts': '1',
@@ -289,14 +289,24 @@ def add_student(student_id, name, course_section):
     conn.close()
     return success
 
+def delete_student_photos(student_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM student_photos WHERE student_id = ?', (student_id,))
+    conn.commit()
+    conn.close()
+
 def add_student_photo(student_id, photo_path):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-    INSERT INTO student_photos (student_id, photo_path)
-    VALUES (?, ?)
-    ''', (student_id, photo_path))
-    conn.commit()
+    # Avoid inserting duplicate path entries for the same student
+    cursor.execute('SELECT id FROM student_photos WHERE student_id = ? AND photo_path = ?', (student_id, photo_path))
+    if not cursor.fetchone():
+        cursor.execute('''
+        INSERT INTO student_photos (student_id, photo_path)
+        VALUES (?, ?)
+        ''', (student_id, photo_path))
+        conn.commit()
     conn.close()
 
 def get_student_photos(student_id):
