@@ -208,9 +208,9 @@ class TestFaceRecognitionSystem(unittest.TestCase):
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         
         # Place 3 registered faces at native 128x128 resolution across the frame
-        frame[160:160+128, 40:40+128] = self.face_a
-        frame[160:160+128, 240:240+128] = self.face_b
-        frame[160:160+128, 440:440+128] = self.face_c
+        frame[150:150+128, 80:80+128] = self.face_a
+        frame[150:150+128, 260:260+128] = self.face_b
+        frame[150:150+128, 440:440+128] = self.face_c
         
         b64 = face_rec.cv2_to_base64(frame)
         res = main.process_frame({"frame": b64})

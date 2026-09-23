@@ -345,24 +345,8 @@ try:
 except Exception as e:
     face_cascade = None
 
-def detect_faces(img, min_size=36, strict_quality=True):
-    """
-    Detects and validates faces in an image (accepts BGR or grayscale numpy arrays).
-    Rejects non-face objects, false detections, corrupted crops, and unusable faces.
-    returns: list of bounding boxes [(x, y, w, h)]
-    """
-    if img is None or img.size == 0:
-        return []
-
-    if len(img.shape) == 2:
-        h, w = img.shape
-        bgr_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        gray_img = img
-    else:
-        h, w = img.shape[:2]
-        bgr_img = img
-        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
+def _run_detection_pass(bgr_img, gray_img, min_size=36, strict_quality=True):
+    h, w = bgr_img.shape[:2]
     # 1. Primary: YuNet Deep Learning detector
     if detector_yunet is not None:
         try:
@@ -373,7 +357,7 @@ def detect_faces(img, min_size=36, strict_quality=True):
                 for f in raw_faces:
                     score = float(f[14]) if len(f) > 14 else 1.0
                     # Reject detections below detector confidence threshold
-                    if score < 0.50:
+                    if score < 0.45:
                         continue
                         
                     x = max(0, int(round(f[0])))
@@ -386,7 +370,7 @@ def detect_faces(img, min_size=36, strict_quality=True):
                         
                     if strict_quality:
                         crop = gray_img[y:y+bh, x:x+bw]
-                        is_valid, _ = validate_face_quality(crop, min_size=min_size, min_blur=15.0)
+                        is_valid, _ = validate_face_quality(crop, min_size=min_size, min_blur=12.0)
                         if not is_valid:
                             continue
                             
@@ -415,13 +399,50 @@ def detect_faces(img, min_size=36, strict_quality=True):
                     
                     if strict_quality:
                         crop = gray_img[y:y+bh, x:x+bw]
-                        is_valid, _ = validate_face_quality(crop, min_size=min_size, min_blur=20.0)
+                        is_valid, _ = validate_face_quality(crop, min_size=min_size, min_blur=15.0)
                         if not is_valid:
                             continue
                     result.append((x, y, bw, bh))
                 return result
         except Exception as e:
             print("[face_rec] Haar cascade detection error:", e)
+
+    return []
+
+def detect_faces(img, min_size=36, strict_quality=True):
+    """
+    Detects and validates faces in an image (accepts BGR or grayscale numpy arrays).
+    Includes an adaptive multi-pass illumination compensator for low-light / underexposed frames.
+    Rejects non-face objects, false detections, corrupted crops, and unusable faces.
+    returns: list of bounding boxes [(x, y, w, h)]
+    """
+    if img is None or img.size == 0:
+        return []
+
+    if len(img.shape) == 2:
+        h, w = img.shape
+        bgr_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        gray_img = img
+    else:
+        h, w = img.shape[:2]
+        bgr_img = img
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Pass 1: Standard detection on original frame
+    results = _run_detection_pass(bgr_img, gray_img, min_size=min_size, strict_quality=strict_quality)
+    if len(results) > 0:
+        return results
+
+    # Pass 2: Adaptive low-light illumination recovery (for dark rooms / night webcam frames)
+    mean_lum = float(np.mean(gray_img))
+    if 5.0 < mean_lum < 75.0:
+        gamma = max(1.5, min(2.8, np.log(0.45) / np.log(max(mean_lum, 1.0) / 255.0)))
+        table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255 for i in np.arange(0, 256)]).astype('uint8')
+        enhanced_bgr = cv2.LUT(bgr_img, table)
+        enhanced_gray = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY)
+        results = _run_detection_pass(enhanced_bgr, enhanced_gray, min_size=min_size, strict_quality=strict_quality)
+        if len(results) > 0:
+            return results
 
     return []
 

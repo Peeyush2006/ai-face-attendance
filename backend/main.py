@@ -219,8 +219,8 @@ def register_student(req: RegisterRequest):
             if img is None or img.size == 0:
                 raise HTTPException(status_code=400, detail=f"Photo {idx+1} could not be decoded. Please provide valid image data.")
             
-            # Detect faces with registration quality requirement (min 45x45 px)
-            detected_boxes = face_rec.detect_faces(img, min_size=45, strict_quality=True)
+            # Detect faces with registration quality requirement (min 36x36 px)
+            detected_boxes = face_rec.detect_faces(img, min_size=36, strict_quality=True)
             
             if len(detected_boxes) == 0:
                 raise HTTPException(
