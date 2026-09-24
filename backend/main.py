@@ -28,6 +28,19 @@ MODELS_DIR = os.path.join(BASE_DIR, 'data', 'models')
 os.makedirs(FACES_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 
+# Auto-seed bundled models if missing in data/models (e.g. fresh container / empty volume mount)
+bundled_models_dir = os.path.join(backend_dir, 'models')
+if os.path.exists(bundled_models_dir):
+    import shutil
+    for mfile in os.listdir(bundled_models_dir):
+        target = os.path.join(MODELS_DIR, mfile)
+        if not os.path.exists(target):
+            try:
+                shutil.copyfile(os.path.join(bundled_models_dir, mfile), target)
+                print(f"[main] Seeded missing model: {mfile}")
+            except Exception as e:
+                print(f"[main] Error seeding model {mfile}: {e}")
+
 MODEL_PATH = os.path.join(MODELS_DIR, 'model_pca.npz')
 
 app = FastAPI(title="AI Attendance System API")
@@ -202,8 +215,8 @@ def register_student(req: RegisterRequest):
             if img is None or img.size == 0:
                 raise HTTPException(status_code=400, detail=f"Photo {idx+1} could not be decoded. Please provide valid image data.")
             
-            # Detect faces with registration quality requirement (min 36x36 px)
-            detected_boxes = face_rec.detect_faces(img, min_size=36, strict_quality=True)
+            # Detect faces with registration requirement (min 32x32 px)
+            detected_boxes = face_rec.detect_faces(img, min_size=32, strict_quality=False)
             
             if len(detected_boxes) == 0:
                 raise HTTPException(
@@ -211,16 +224,23 @@ def register_student(req: RegisterRequest):
                     detail=f"No valid face detected in photo {idx+1}. Arbitrary objects or non-faces cannot be registered. Please face the camera directly with good lighting."
                 )
             if len(detected_boxes) > 1:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Multiple faces ({len(detected_boxes)}) detected in photo {idx+1}. Exactly one face must be present during registration."
-                )
+                # Discard small background noise artifacts if one primary face is dominant
+                largest_box = max(detected_boxes, key=lambda b: b[2] * b[3])
+                max_area = largest_box[2] * largest_box[3]
+                filtered_boxes = [b for b in detected_boxes if (b[2] * b[3]) >= 0.35 * max_area]
+                if len(filtered_boxes) == 1:
+                    detected_boxes = filtered_boxes
+                else:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Multiple faces ({len(detected_boxes)}) detected in photo {idx+1}. Exactly one face must be present during registration."
+                    )
                 
             bbox = detected_boxes[0]
             face_crop = face_rec.preprocess_face(img, bbox)
             
             # Verify crop quality
-            is_valid, reason = face_rec.validate_face_quality(face_crop, min_size=40, min_blur=16.0)
+            is_valid, reason = face_rec.validate_face_quality(face_crop, min_size=32, min_blur=6.0)
             if not is_valid:
                 raise HTTPException(status_code=400, detail=f"Photo {idx+1} failed quality check ({reason}). Please capture a clear, non-blurred face.")
                 

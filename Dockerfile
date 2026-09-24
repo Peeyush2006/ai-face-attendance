@@ -16,9 +16,10 @@ COPY requirements.txt .
 RUN pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless opencv-contrib-python-headless \
     && pip install --no-cache-dir -r requirements.txt
 
-# Copy the backend and frontend folders into the container
+# Copy the backend, frontend, and data folders into the container
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
+COPY data/ ./data/
 
 # Expose the application port
 EXPOSE 8000

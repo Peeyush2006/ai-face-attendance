@@ -3,11 +3,11 @@ import cv2
 import numpy as np
 import base64
 
-def validate_face_quality(gray_crop, min_size=36, min_blur=18.0):
+def validate_face_quality(gray_crop, min_size=32, min_blur=6.0):
     """
     Validates face crop to reject unusable detections:
     - extremely small faces
-    - heavily blurred faces
+    - heavily blurred non-faces
     - invalid bounding boxes
     - corrupted crops / zero variance / non-face objects
     """
@@ -19,12 +19,12 @@ def validate_face_quality(gray_crop, min_size=36, min_blur=18.0):
         return False, f"Face size too small ({w}x{h} < {min_size})"
         
     aspect_ratio = float(w) / float(h)
-    if aspect_ratio < 0.55 or aspect_ratio > 1.45:
+    if aspect_ratio < 0.45 or aspect_ratio > 1.75:
         return False, f"Invalid aspect ratio ({aspect_ratio:.2f})"
         
     std_val = float(np.std(gray_crop))
     mean_val = float(np.mean(gray_crop))
-    if std_val < 12.0 or mean_val < 10.0 or mean_val > 245.0:
+    if std_val < 8.0 or mean_val < 6.0 or mean_val > 250.0:
         return False, f"Insufficient contrast or uniform lighting (std={std_val:.1f}, mean={mean_val:.1f})"
         
     blur_score = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
@@ -350,37 +350,57 @@ class EigenfaceRecognizer:
             print(f"Error loading model: {e}")
             return False
 
-# Base directory path for models
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_YUNET_PATH = os.path.join(_BASE_DIR, 'data', 'models', 'face_detection_yunet_2023mar.onnx')
+# Base directory paths for models (supports local run, docker container, Render native, or custom persistent disk mount)
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_BASE_DIR = os.path.dirname(_DIR)
+
+_YUNET_CANDIDATES = [
+    os.path.join(_DIR, 'models', 'face_detection_yunet_2023mar.onnx'),
+    os.path.join(_BASE_DIR, 'data', 'models', 'face_detection_yunet_2023mar.onnx'),
+    os.path.join(_BASE_DIR, 'models', 'face_detection_yunet_2023mar.onnx'),
+    os.path.join('/app', 'backend', 'models', 'face_detection_yunet_2023mar.onnx'),
+    os.path.join('/app', 'data', 'models', 'face_detection_yunet_2023mar.onnx'),
+]
+
+_YUNET_PATH = None
+for p in _YUNET_CANDIDATES:
+    if os.path.exists(p):
+        _YUNET_PATH = p
+        break
 
 # Initialize YuNet Deep Learning face detector (Primary, works with OpenCV 4.x and 5.x)
 detector_yunet = None
-if hasattr(cv2, 'FaceDetectorYN_create') and os.path.exists(_YUNET_PATH):
+if hasattr(cv2, 'FaceDetectorYN_create') and _YUNET_PATH:
     try:
         detector_yunet = cv2.FaceDetectorYN_create(
             _YUNET_PATH, "", (320, 320),
             score_threshold=0.28,
             nms_threshold=0.3
         )
-        print("[face_rec] YuNet deep-learning face detector initialized successfully.")
+        print(f"[face_rec] YuNet deep-learning face detector initialized successfully from {_YUNET_PATH}.")
     except Exception as e:
         print("[face_rec] Could not initialize YuNet detector:", e)
         detector_yunet = None
 
 # Initialize Haar Cascade face detector (Secondary fallback)
+_HAAR_CANDIDATES = [
+    os.path.join(_DIR, 'models', 'haarcascade_frontalface_default.xml'),
+    os.path.join(_BASE_DIR, 'data', 'models', 'haarcascade_frontalface_default.xml'),
+    os.path.join('/app', 'backend', 'models', 'haarcascade_frontalface_default.xml'),
+    os.path.join(getattr(getattr(cv2, 'data', None), 'haarcascades', ''), 'haarcascade_frontalface_default.xml') if hasattr(cv2, 'data') else '',
+    'haarcascade_frontalface_default.xml'
+]
+
 face_cascade = None
-try:
-    if hasattr(cv2, 'CascadeClassifier'):
-        if hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
-            xml_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
-            if os.path.exists(xml_path):
-                face_cascade = cv2.CascadeClassifier(xml_path)
-        
-        if face_cascade is None or face_cascade.empty():
-            face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-except Exception as e:
-    face_cascade = None
+for p in _HAAR_CANDIDATES:
+    if p and os.path.exists(p):
+        try:
+            face_cascade = cv2.CascadeClassifier(p)
+            if face_cascade is not None and not face_cascade.empty():
+                print(f"[face_rec] Haar cascade initialized successfully from {p}.")
+                break
+        except Exception:
+            pass
 
 def _run_detection_pass(bgr_img, gray_img, min_size=32, strict_quality=False):
     h, w = bgr_img.shape[:2]
