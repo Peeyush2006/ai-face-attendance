@@ -551,7 +551,7 @@ async function startAttendanceCamera() {
     
     canvas.style.display = "block";
     canvas.width = 640;
-    canvas.height = 400;
+    canvas.height = 480;
     
     // First try browser media stream
     try {
@@ -645,15 +645,20 @@ function startProcessingFrames() {
     const hCtx = hiddenCanvas.getContext("2d");
     
     let isProcessing = false;
+    let initialDrawDone = false;
     
     attendanceInterval = setInterval(async () => {
         if (isProcessing) return;
+        if (!video || video.readyState < 2 || video.videoWidth === 0) return;
         
-        // Draw frame to display canvas
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        // Initial paint to avoid blank screen before first server response
+        if (!initialDrawDone) {
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            initialDrawDone = true;
+        }
         
         // Draw frame to hidden processing canvas (mirrored to match preview & registration)
         hCtx.translate(hiddenCanvas.width, 0);
@@ -671,7 +676,7 @@ function startProcessingFrames() {
             });
             const data = await response.json();
             
-            // Draw the annotated image returned by server (it has bounding boxes)
+            // Draw the annotated image returned by server (it has bounding boxes & status)
             if (data.annotated_frame) {
                 const img = new Image();
                 img.onload = () => {
@@ -691,7 +696,7 @@ function startProcessingFrames() {
         } finally {
             isProcessing = false;
         }
-    }, 200); // 5 frames per second
+    }, 120); // ~8 frames per second for smooth, responsive detection
 }
 
 // Simulated Live Feed

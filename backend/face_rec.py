@@ -360,7 +360,7 @@ if hasattr(cv2, 'FaceDetectorYN_create') and os.path.exists(_YUNET_PATH):
     try:
         detector_yunet = cv2.FaceDetectorYN_create(
             _YUNET_PATH, "", (320, 320),
-            score_threshold=0.55,
+            score_threshold=0.28,
             nms_threshold=0.3
         )
         print("[face_rec] YuNet deep-learning face detector initialized successfully.")
@@ -382,19 +382,20 @@ try:
 except Exception as e:
     face_cascade = None
 
-def _run_detection_pass(bgr_img, gray_img, min_size=36, strict_quality=True):
+def _run_detection_pass(bgr_img, gray_img, min_size=32, strict_quality=False):
     h, w = bgr_img.shape[:2]
     # 1. Primary: YuNet Deep Learning detector
     if detector_yunet is not None:
         try:
             detector_yunet.setInputSize((w, h))
+            detector_yunet.setScoreThreshold(0.28)
             _, raw_faces = detector_yunet.detect(bgr_img)
             if raw_faces is not None and len(raw_faces) > 0:
                 result = []
                 for f in raw_faces:
                     score = float(f[14]) if len(f) > 14 else 1.0
-                    # Reject detections below detector confidence threshold
-                    if score < 0.45:
+                    # Sensitive threshold to capture faces across head tilts and variable lighting
+                    if score < 0.28:
                         continue
                         
                     x = max(0, int(round(f[0])))
@@ -407,7 +408,7 @@ def _run_detection_pass(bgr_img, gray_img, min_size=36, strict_quality=True):
                         
                     if strict_quality:
                         crop = gray_img[y:y+bh, x:x+bw]
-                        is_valid, _ = validate_face_quality(crop, min_size=min_size, min_blur=12.0)
+                        is_valid, _ = validate_face_quality(crop, min_size=min_size, min_blur=10.0)
                         if not is_valid:
                             continue
                             
@@ -422,8 +423,8 @@ def _run_detection_pass(bgr_img, gray_img, min_size=36, strict_quality=True):
         try:
             faces = face_cascade.detectMultiScale(
                 gray_img, 
-                scaleFactor=1.1, 
-                minNeighbors=5, 
+                scaleFactor=1.08, 
+                minNeighbors=3, 
                 minSize=(min_size, min_size)
             )
             if len(faces) > 0:
@@ -436,7 +437,7 @@ def _run_detection_pass(bgr_img, gray_img, min_size=36, strict_quality=True):
                     
                     if strict_quality:
                         crop = gray_img[y:y+bh, x:x+bw]
-                        is_valid, _ = validate_face_quality(crop, min_size=min_size, min_blur=15.0)
+                        is_valid, _ = validate_face_quality(crop, min_size=min_size, min_blur=10.0)
                         if not is_valid:
                             continue
                     result.append((x, y, bw, bh))
@@ -446,11 +447,13 @@ def _run_detection_pass(bgr_img, gray_img, min_size=36, strict_quality=True):
 
     return []
 
-def detect_faces(img, min_size=36, strict_quality=True):
+def detect_faces(img, min_size=32, strict_quality=False):
     """
     Detects and validates faces in an image (accepts BGR or grayscale numpy arrays).
-    Includes an adaptive multi-pass illumination compensator for low-light / underexposed frames.
-    Rejects non-face objects, false detections, corrupted crops, and unusable faces.
+    Includes an adaptive multi-pass illumination compensator for low-light / backlit frames.
+    Pass 1: Native YuNet Deep Learning (score_threshold=0.35)
+    Pass 2: CLAHE local illumination enhancement (shadows/backlighting)
+    Pass 3: Adaptive Gamma illumination recovery (dark rooms)
     returns: list of bounding boxes [(x, y, w, h)]
     """
     if img is None or img.size == 0:
@@ -470,16 +473,30 @@ def detect_faces(img, min_size=36, strict_quality=True):
     if len(results) > 0:
         return results
 
-    # Pass 2: Adaptive low-light illumination recovery (for dark rooms / night webcam frames)
-    mean_lum = float(np.mean(gray_img))
-    if 5.0 < mean_lum < 75.0:
-        gamma = max(1.5, min(2.8, np.log(0.45) / np.log(max(mean_lum, 1.0) / 255.0)))
-        table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255 for i in np.arange(0, 256)]).astype('uint8')
-        enhanced_bgr = cv2.LUT(bgr_img, table)
-        enhanced_gray = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY)
+    # Pass 2: Adaptive CLAHE local illumination enhancement (recovers faces in backlight / shadows)
+    try:
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced_gray = clahe.apply(gray_img)
+        enhanced_bgr = cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR)
         results = _run_detection_pass(enhanced_bgr, enhanced_gray, min_size=min_size, strict_quality=strict_quality)
         if len(results) > 0:
             return results
+    except Exception:
+        pass
+
+    # Pass 3: Adaptive low-light illumination recovery (for dark rooms / night webcam frames)
+    mean_lum = float(np.mean(gray_img))
+    if 5.0 < mean_lum < 85.0:
+        try:
+            gamma = max(1.5, min(2.8, np.log(0.45) / np.log(max(mean_lum, 1.0) / 255.0)))
+            table = np.array([((i / 255.0) ** (1.0 / gamma)) * 255 for i in np.arange(0, 256)]).astype('uint8')
+            enhanced_bgr = cv2.LUT(bgr_img, table)
+            enhanced_gray = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY)
+            results = _run_detection_pass(enhanced_bgr, enhanced_gray, min_size=min_size, strict_quality=strict_quality)
+            if len(results) > 0:
+                return results
+        except Exception:
+            pass
 
     return []
 

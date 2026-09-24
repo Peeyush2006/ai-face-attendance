@@ -269,7 +269,7 @@ def process_frame(payload: dict = Body(...)):
             return {"face_detected": False, "faces_count": 0, "recognitions": [], "recognition": None, "annotated_frame": frame_b64}
             
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        detected_faces = face_rec.detect_faces(img, min_size=36, strict_quality=True)
+        detected_faces = face_rec.detect_faces(img, min_size=32, strict_quality=False)
         
         # System settings
         settings = database.get_settings()
