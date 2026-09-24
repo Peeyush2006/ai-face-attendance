@@ -527,8 +527,12 @@ async function saveAndEncodeStudent() {
     } catch (err) {
         console.error(err);
         showToast(err.message, "error");
+        // Automatically reset photo buffer so user can immediately capture fresh photos
+        capturedPhotos = [];
+        updateCaptureProgress();
+        document.getElementById("btn-capture").disabled = false;
+        document.getElementById("btn-save-encode").disabled = true;
     } finally {
-        saveBtn.disabled = false;
         saveBtn.innerHTML = originalText;
     }
 }
