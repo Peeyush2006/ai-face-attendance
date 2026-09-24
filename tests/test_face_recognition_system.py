@@ -333,5 +333,60 @@ class TestFaceRecognitionSystem(unittest.TestCase):
         self.assertEqual(row_final[0], 1, "Attendance must remain exactly 1 record for today")
         print("[PASS] TEST 12: Temporal stabilization required 2 frames; attendance recorded exactly once.")
 
+    # -------------------------------------------------------------
+    # TEST 13: Single enrolled student model stranger rejection
+    # (Specific regression test: Unknown face must NEVER match the last registered student)
+    # -------------------------------------------------------------
+    def test_13_single_enrolled_student_stranger_rejection(self):
+        print("\n--- Running TEST 13: Single student enrolled stranger rejection ---")
+        single_rec = face_rec.EigenfaceRecognizer(num_components=20, img_size=(128, 128))
+        
+        # Train model with ONLY Student A (Peeyush Tiwari)
+        photos_a = [cv2.equalizeHist(cv2.imread(os.path.join(BASE_DIR, 'data', 'faces', self.student_a_id, f"face_{i}.png"), cv2.IMREAD_GRAYSCALE)) for i in range(1, 6)]
+        single_rec.train(photos_a, [self.student_a_id] * len(photos_a))
+        
+        # Test 1: Genuine Student A must be recognized
+        sid_a, dist_a, conf_a = single_rec.predict(photos_a[0], threshold=0.50)
+        self.assertEqual(sid_a, self.student_a_id)
+        self.assertGreaterEqual(conf_a, 0.70)
+        
+        # Test 2: Another person's face (Student B / stranger) MUST BE REJECTED
+        stranger_crop = cv2.equalizeHist(cv2.cvtColor(self.face_b, cv2.COLOR_BGR2GRAY))
+        sid_s, dist_s, conf_s = single_rec.predict(stranger_crop, threshold=0.50)
+        self.assertIsNone(sid_s, f"Stranger was falsely recognized as '{sid_s}'! Rejection failed.")
+        self.assertLess(conf_s, 0.50)
+        print(f"[PASS] TEST 13: Stranger correctly rejected when only 1 student is enrolled (label={sid_s}, conf={conf_s*100:.1f}%).")
+
+    # -------------------------------------------------------------
+    # TEST 14: Multiple unknown strangers together in frame
+    # -------------------------------------------------------------
+    def test_14_multiple_unknown_strangers_together(self):
+        print("\n--- Running TEST 14: Multiple unknown strangers together in frame ---")
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        
+        # Stranger 1: Drawn face with landmarks on left
+        s1 = np.zeros((128, 128, 3), dtype=np.uint8)
+        cv2.ellipse(s1, (64, 64), (45, 55), 0, 0, 360, (160, 160, 160), -1)
+        cv2.circle(s1, (46, 50), 6, (30, 30, 30), -1)
+        cv2.circle(s1, (82, 50), 6, (30, 30, 30), -1)
+        frame[150:150+128, 80:80+128] = s1
+        
+        # Stranger 2: Another face shape on right
+        s2 = np.zeros((128, 128, 3), dtype=np.uint8)
+        cv2.ellipse(s2, (64, 64), (40, 50), 0, 0, 360, (140, 140, 140), -1)
+        cv2.circle(s2, (48, 52), 5, (20, 20, 20), -1)
+        cv2.circle(s2, (80, 52), 5, (20, 20, 20), -1)
+        frame[150:150+128, 400:400+128] = s2
+        
+        b64 = face_rec.cv2_to_base64(frame)
+        res = main.process_frame({"frame": b64})
+        
+        recognized = [r for r in res["recognitions"] if r["recognized"]]
+        self.assertEqual(len(recognized), 0, "No unknown strangers should ever be recognized as registered students")
+        for r in res["recognitions"]:
+            self.assertIsNone(r["student_id"])
+            self.assertEqual(r["student_name"], "Unknown")
+        print("[PASS] TEST 14: Multiple unknown strangers all correctly marked Unknown.")
+
 if __name__ == '__main__':
     unittest.main()

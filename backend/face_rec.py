@@ -45,6 +45,7 @@ class EigenfaceRecognizer:
         self.class_radii = {}
         self.class_mean_faces = {}
         self.class_img_radii = {}
+        self.class_photos = {}
         self.max_recon_error = 22.0
 
     def train(self, faces_list, labels_list):
@@ -101,19 +102,19 @@ class EigenfaceRecognizer:
         eigenvalues = eigenvalues[idx]
         eigenvectors = eigenvectors[:, idx]
         
-        # Map eigenvectors back to original dimensions: U = A.T @ eigenvectors
-        U = A.T @ eigenvectors
-        
-        # Normalize eigenvectors to have unit length
-        norms = np.linalg.norm(U, axis=0)
-        norms[norms == 0] = 1e-10  # Avoid division by zero
-        U = U / norms
-        
-        # Select top k components
-        k = min(self.num_components, N - 1)
-        if k <= 0:
-            k = 1
-        self.eigenfaces = U[:, :k]
+        # Strictly filter out zero or negligible eigenvalues (prevent dividing by numerical noise)
+        max_eig = float(eigenvalues[0]) if len(eigenvalues) > 0 else 0.0
+        if max_eig > 1.0:
+            threshold_val = max(1e-4 * max_eig, 1.0)
+            valid_k = int(np.sum(eigenvalues > threshold_val))
+            k = max(1, min(self.num_components, valid_k))
+            U = A.T @ eigenvectors[:, :k]
+            norms = np.linalg.norm(U, axis=0)
+            norms[norms == 0] = 1e-10
+            self.eigenfaces = U / norms
+        else:
+            # Fallback if all training samples have near-zero variance
+            self.eigenfaces = np.ones((D, 1), dtype=np.float32) / np.sqrt(D)
         
         # Project training images onto the face space
         self.projections = A @ self.eigenfaces
@@ -121,36 +122,36 @@ class EigenfaceRecognizer:
         # Calculate training reconstruction errors to establish face manifold boundary
         recon_A = self.projections @ self.eigenfaces.T
         train_recon_errors = np.linalg.norm(A - recon_A, axis=1) / np.sqrt(D)
-        max_train_recon = float(np.max(train_recon_errors)) if len(train_recon_errors) > 0 else 10.0
-        # Allow reasonable variance for test lighting/angles while rejecting out-of-distribution strangers
-        self.max_recon_error = min(max(max_train_recon * 1.8, 20.0), 38.0)
+        max_train_recon = float(np.max(train_recon_errors)) if len(train_recon_errors) > 0 else 5.0
+        self.max_recon_error = min(max(max_train_recon * 2.0, 15.0), 35.0)
         
-        # Calculate per-class templates, centroids, and intra-class radii
+        # Calculate per-class photo banks, templates, centroids, and cluster radii
         self.class_centroids = {}
         self.class_radii = {}
         self.class_mean_faces = {}
         self.class_img_radii = {}
+        self.class_photos = {}
         unique_labels = set(self.labels)
         
         for label in unique_labels:
             indices = [i for i, l in enumerate(self.labels) if l == label]
             class_X = X[indices]
             class_proj = self.projections[indices]
+            self.class_photos[label] = class_X
             
             # PCA centroid and radius
             centroid = np.mean(class_proj, axis=0)
             self.class_centroids[label] = centroid
             dists = np.linalg.norm(class_proj - centroid, axis=1)
-            raw_radius = float(np.max(dists)) if len(dists) > 0 else 500.0
-            # Bound intra-class radius to prevent manifold explosion
-            self.class_radii[label] = max(min(raw_radius * 2.2, 2800.0), 1000.0)
+            raw_radius = float(np.max(dists)) if len(dists) > 0 else 300.0
+            self.class_radii[label] = max(min(raw_radius * 1.5, 1500.0), 400.0)
             
             # Image space template and pixel variance radius
             mean_img = np.mean(class_X, axis=0)
             self.class_mean_faces[label] = mean_img
             img_dists = np.linalg.norm(class_X - mean_img, axis=1) / np.sqrt(D)
-            raw_img_radius = float(np.max(img_dists)) if len(img_dists) > 0 else 20.0
-            self.class_img_radii[label] = max(min(raw_img_radius * 2.2, 55.0), 20.0)
+            raw_img_radius = float(np.max(img_dists)) if len(img_dists) > 0 else 15.0
+            self.class_img_radii[label] = max(min(raw_img_radius * 1.8, 45.0), 18.0)
             
         return True
 
@@ -163,15 +164,20 @@ class EigenfaceRecognizer:
         if self.eigenfaces is None or self.mean_face is None or self.projections is None:
             return None, float('inf'), 0.0
             
+        if face_img.shape != self.img_size:
+            face_img = cv2.resize(face_img, self.img_size, interpolation=cv2.INTER_AREA)
+
         q = face_img.flatten().astype(np.float32)
         D = q.shape[0]
+        q_mean = float(np.mean(q))
+        q_std = float(np.std(q)) + 1e-6
+        q_norm = (q - q_mean) / q_std
+        
         q_centered = q - self.mean_face
         
         # 1. Project onto the eigenfaces space
         q_proj = q_centered @ self.eigenfaces
         q_proj_norm = float(np.linalg.norm(q_proj))
-        if q_proj_norm < 1e-6:
-            return None, float('inf'), 0.0
             
         # 2. Compute Reconstruction Residual (Distance to Face Space - DFFS)
         q_recon_centered = q_proj @ self.eigenfaces.T
@@ -180,72 +186,94 @@ class EigenfaceRecognizer:
         # 3. Vectorized Subspace Distances and Cosine Similarities against ALL registered projections
         distances = np.linalg.norm(self.projections - q_proj, axis=1)
         proj_norms = np.linalg.norm(self.projections, axis=1)
-        cos_sims = (self.projections @ q_proj) / (proj_norms * q_proj_norm + 1e-10)
+        if q_proj_norm > 1e-6:
+            cos_sims = (self.projections @ q_proj) / (proj_norms * q_proj_norm + 1e-10)
+        else:
+            cos_sims = np.zeros(len(self.projections))
         
         unique_labels = list(dict.fromkeys(self.labels))
         class_scores = {}
-        has_templates = hasattr(self, 'class_mean_faces') and bool(self.class_mean_faces)
         
         for l in unique_labels:
             idxs = [i for i, lab in enumerate(self.labels) if lab == l]
             min_d = float(np.min(distances[idxs]))
-            best_c = float(np.max(cos_sims[idxs]))
             
-            if has_templates and l in self.class_mean_faces:
-                template = self.class_mean_faces[l]
-                rmse = float(np.linalg.norm(q - template) / np.sqrt(D))
+            # Photo-level Normalized Pearson Correlation & RMSE against student's enrolled photos
+            photos = self.class_photos.get(l)
+            if photos is None or len(photos) == 0:
+                if l in self.class_mean_faces:
+                    photos = [self.class_mean_faces[l]]
+                else:
+                    photos = []
+                    
+            best_r = -1.0
+            min_rmse = float('inf')
+            for p in photos:
+                p_mean = float(np.mean(p))
+                p_std = float(np.std(p)) + 1e-6
+                p_norm = (p - p_mean) / p_std
+                r = float(np.dot(q_norm, p_norm) / D)
+                rmse = float(np.linalg.norm(q - p) / np.sqrt(D))
+                if r > best_r:
+                    best_r = r
+                if rmse < min_rmse:
+                    min_rmse = rmse
+                    
+            if q_proj_norm > 1e-6:
+                best_c = float(np.max(cos_sims[idxs]))
             else:
-                rmse = 0.0
+                best_c = 1.0 if min_rmse < 15.0 else 0.0
                 
             class_scores[l] = {
                 "min_d": min_d,
                 "best_c": best_c,
-                "rmse": rmse
+                "best_r": best_r,
+                "min_rmse": min_rmse
             }
             
-        # Sort candidates primarily by cosine similarity in PCA subspace, secondarily by Euclidean distance
-        sorted_candidates = sorted(unique_labels, key=lambda l: (class_scores[l]["best_c"], -class_scores[l]["min_d"]), reverse=True)
+        # Sort candidates primarily by direct photo Pearson correlation, secondarily by subspace cosine similarity
+        sorted_candidates = sorted(unique_labels, key=lambda l: (class_scores[l]["best_r"], class_scores[l]["best_c"]), reverse=True)
         candidate_label = sorted_candidates[0]
         cand_score = class_scores[candidate_label]
         
+        best_r = cand_score["best_r"]
+        best_c = cand_score["best_c"]
+        min_rmse = cand_score["min_rmse"]
         min_sample_dist = cand_score["min_d"]
-        best_cos = cand_score["best_c"]
-        best_rmse = cand_score["rmse"]
         
-        second_cos = class_scores[sorted_candidates[1]]["best_c"] if len(sorted_candidates) > 1 else -1.0
+        second_r = class_scores[sorted_candidates[1]]["best_r"] if len(sorted_candidates) > 1 else -1.0
         
         # Adaptive manifold and distance boundaries
-        allowable_recon = max(getattr(self, 'max_recon_error', 20.0), 62.0)
-        allowable_dist = max(self.class_radii.get(candidate_label, 1800.0) * 1.5, 3000.0) if hasattr(self, 'class_radii') else 3000.0
-        allowable_rmse = max(self.class_img_radii.get(candidate_label, 30.0) * 1.8, 56.0) if hasattr(self, 'class_img_radii') else 56.0
-        min_required_cos = 0.65
+        allowable_recon = max(self.max_recon_error, 55.0)
+        allowable_dist = max(self.class_radii.get(candidate_label, 1500.0) * 2.0, 4200.0)
+        allowable_rmse = 68.0
+        min_required_r = 0.55
+        min_required_c = 0.65
         
         # Strict Rejection Criteria (Ensure an unknown or object NEVER falsely matches a student):
-        # 1. Non-face manifold residual: non-face objects / corrupted crops do not lie on the face manifold
+        # 1. Pearson Correlation: query must exhibit high structural correlation with candidate's photos
         # 2. Subspace Cosine Similarity: must exhibit clear facial component alignment
-        # 3. Subspace Distance: must fall within candidate cluster boundary
-        # 4. Image Template RMSE (if enrolled): pixel structure must not drastically deviate
-        # 5. Multi-candidate margin: must distinguish cleanly from 2nd best candidate
+        # 3. Pixel deviation (RMSE): pixel values must not drastically deviate from candidate's photos
+        # 4. Non-face manifold residual: non-face objects / corrupted crops do not lie on the face manifold
+        # 5. Subspace Distance: must fall within candidate cluster boundary
+        # 6. Multi-candidate margin: must distinguish cleanly from 2nd best candidate
         is_stranger = (
+            best_r < min_required_r or
+            best_c < min_required_c or
+            min_rmse > allowable_rmse or
             recon_error > allowable_recon or
-            best_cos < min_required_cos or
             min_sample_dist > allowable_dist or
-            (has_templates and candidate_label in self.class_mean_faces and best_rmse > allowable_rmse) or
-            (len(unique_labels) > 1 and best_cos < 0.85 and (best_cos - second_cos) < 0.04)
+            (len(unique_labels) > 1 and best_r < 0.85 and (best_r - second_r) < 0.04)
         )
         
         # Composite confidence score:
-        # Subspace cosine similarity is scale/lighting invariant and primary (60%)
-        # Euclidean distance in eigenspace relative to cluster boundary (25%)
-        # Face manifold reconstruction residual (15%)
-        conf_cos = max(0.0, min(1.0, (best_cos - 0.45) / 0.50))
-        conf_dist = max(0.0, min(1.0, 1.0 - min_sample_dist / allowable_dist))
-        conf_recon = max(0.0, min(1.0, 1.0 - (recon_error / allowable_recon)))
-        confidence = float(0.60 * conf_cos + 0.25 * conf_dist + 0.15 * conf_recon)
+        conf_corr = max(0.0, min(1.0, (best_r - 0.45) / 0.50))
+        conf_rmse = max(0.0, min(1.0, 1.0 - (min_rmse / allowable_rmse)))
+        conf_cos = max(0.0, min(1.0, (best_c - 0.45) / 0.50))
+        confidence = float(0.50 * conf_corr + 0.30 * conf_rmse + 0.20 * conf_cos)
         
         if is_stranger or confidence < threshold:
-            # Rejection confirmed - return None for identity
-            rejected_conf = max(0.0, min(0.48, confidence if not is_stranger else conf_cos * 0.4))
+            rejected_conf = max(0.0, min(0.48, confidence * 0.4))
             return None, min_sample_dist, float(rejected_conf)
             
         return candidate_label, min_sample_dist, float(confidence)
@@ -263,6 +291,7 @@ class EigenfaceRecognizer:
         radii_arr = np.array([self.class_radii[l] for l in unique_labels])
         templates_arr = np.array([self.class_mean_faces[l] for l in unique_labels])
         img_radii_arr = np.array([self.class_img_radii[l] for l in unique_labels])
+        photos_arr = np.array([self.class_photos.get(l, [self.class_mean_faces[l]]) for l in unique_labels], dtype=object)
         
         # Remove existing file if present to prevent Windows file locking issues in zipfile
         if os.path.exists(filepath):
@@ -281,6 +310,7 @@ class EigenfaceRecognizer:
                  radii=radii_arr,
                  templates=templates_arr,
                  img_radii=img_radii_arr,
+                 photos_arr=photos_arr,
                  max_recon_error=float(self.max_recon_error))
         return True
 
@@ -288,26 +318,33 @@ class EigenfaceRecognizer:
         if not os.path.exists(filepath):
             return False
         try:
-            data = np.load(filepath, allow_pickle=True)
-            self.mean_face = data['mean_face']
-            self.eigenfaces = data['eigenfaces']
-            self.projections = data['projections']
-            self.labels = list(data['labels'])
-            if 'max_recon_error' in data:
-                self.max_recon_error = float(data['max_recon_error'])
-            
-            if 'unique_labels' in data and 'centroids' in data:
-                u_labels = list(data['unique_labels'])
-                centroids = data['centroids']
-                radii = data['radii'] if 'radii' in data else [800.0] * len(u_labels)
-                self.class_centroids = {u_labels[i]: centroids[i] for i in range(len(u_labels))}
-                self.class_radii = {u_labels[i]: float(radii[i]) for i in range(len(u_labels))}
+            with np.load(filepath, allow_pickle=True) as data:
+                self.mean_face = data['mean_face']
+                self.eigenfaces = data['eigenfaces']
+                self.projections = data['projections']
+                self.labels = list(data['labels'])
+                if 'max_recon_error' in data:
+                    self.max_recon_error = float(data['max_recon_error'])
                 
-                if 'templates' in data and 'img_radii' in data:
-                    templates = data['templates']
-                    img_radii = data['img_radii']
-                    self.class_mean_faces = {u_labels[i]: templates[i] for i in range(len(u_labels))}
-                    self.class_img_radii = {u_labels[i]: float(img_radii[i]) for i in range(len(u_labels))}
+                if 'unique_labels' in data and 'centroids' in data:
+                    u_labels = list(data['unique_labels'])
+                    centroids = data['centroids']
+                    radii = data['radii'] if 'radii' in data else [600.0] * len(u_labels)
+                    self.class_centroids = {u_labels[i]: centroids[i] for i in range(len(u_labels))}
+                    self.class_radii = {u_labels[i]: float(radii[i]) for i in range(len(u_labels))}
+                    
+                    if 'templates' in data and 'img_radii' in data:
+                        templates = data['templates']
+                        img_radii = data['img_radii']
+                        self.class_mean_faces = {u_labels[i]: templates[i] for i in range(len(u_labels))}
+                        self.class_img_radii = {u_labels[i]: float(img_radii[i]) for i in range(len(u_labels))}
+                        
+                    if 'photos_arr' in data:
+                        for l, p in zip(u_labels, data['photos_arr']):
+                            self.class_photos[str(l)] = np.array(p, dtype=np.float32)
+                    elif hasattr(self, 'class_mean_faces'):
+                        for l in u_labels:
+                            self.class_photos[str(l)] = np.array([self.class_mean_faces[l]], dtype=np.float32)
             return True
         except Exception as e:
             print(f"Error loading model: {e}")

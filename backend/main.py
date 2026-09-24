@@ -104,14 +104,14 @@ def load_and_train_recognizer(force: bool = False):
             print("Loaded pre-trained PCA model successfully.")
             return True
             
-    # Train a new model from photos database & data/faces directory
-    print("Training PCA model from database photos and faces directory...")
+    # Train a new model from verified database photos
+    print("Training PCA model from verified student database photos...")
     faces_list = []
     labels_list = []
     seen_paths = set()
     import cv2
     
-    # 1. Check database records
+    # Check database records
     photos = database.get_all_student_photos()
     for p in photos:
         path = p['photo_path']
@@ -133,29 +133,12 @@ def load_and_train_recognizer(force: bool = False):
                 faces_list.append(img_eq)
                 labels_list.append(sid)
                 
-    # 2. Also scan data/faces directory for any student face sets
-    if os.path.exists(FACES_DIR):
-        for sid_folder in os.listdir(FACES_DIR):
-            folder_path = os.path.join(FACES_DIR, sid_folder)
-            if os.path.isdir(folder_path):
-                for fname in os.listdir(folder_path):
-                    if fname.endswith(('.png', '.jpg', '.jpeg')):
-                        img_path = os.path.join(folder_path, fname)
-                        real_path = os.path.normpath(os.path.abspath(img_path))
-                        if real_path not in seen_paths:
-                            seen_paths.add(real_path)
-                            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-                            if img is not None:
-                                img_eq = cv2.equalizeHist(img)
-                                faces_list.append(img_eq)
-                                labels_list.append(sid_folder)
-                            
     if len(faces_list) > 0:
         if recognizer.train(faces_list, labels_list):
             recognizer.save(MODEL_PATH)
-            print(f"PCA Model trained successfully on {len(faces_list)} images for {len(set(labels_list))} students and saved.")
+            print(f"Model trained successfully on {len(faces_list)} images for {len(set(labels_list))} students and saved.")
             return True
-    print("PCA Model training failed (insufficient images).")
+    print("Model training skipped or failed (insufficient registered images).")
     return False
 
 # Initialize and load model on module load
